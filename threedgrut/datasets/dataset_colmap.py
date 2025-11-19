@@ -13,8 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 import copy
+import os
 import platform
 import json
 import collections
@@ -58,9 +58,9 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
         downsample_factor=1,
         test_split_interval=8,
         ray_jitter=None,
-        selected_indices_file="", # A json file with the first (or second) half ordered camera poses
-        num_selected_indices="", # Number of selected camera indices for sparse recon
-        train_test_split_file="", # For mipnerf360 data format
+        selected_indices_file=None, # A json file with the first (or second) half ordered camera poses
+        num_selected_indices=None, # Number of selected camera indices for sparse recon
+        train_test_split_file=None, # For mipnerf360 data format
     ):
         self.path = path
         self.device = device
@@ -89,8 +89,8 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
         indices = np.arange(self.n_frames)
 
         # If selected_indices_file is set, load the file and use num_selected_indices to select training set
-        if self.selected_indices_file != "":
-            print("self.selected_indices_file: ", self.selected_indices_file)
+        if self.selected_indices_file is not None:
+            logger.info(f"self.selected_indices_file: {self.selected_indices_file}")
             with open(self.selected_indices_file, "r") as f:
                 selected_indices = json.load(f)
             if self.split == "train":
@@ -98,8 +98,8 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
             else:
                 indices = np.setdiff1d(indices, selected_indices[:self.num_selected_indices])
         # If train_test_split_file (for mipnerf360) is set, load the file and use num_selected_indices to select training set
-        elif self.train_test_split_file != "":
-            print("self.train_test_split_file: ", self.train_test_split_file)
+        elif self.train_test_split_file is not None:
+            logger.info(f"self.train_test_split_file: {self.train_test_split_file}")
             f_split = open(self.train_test_split_file, "r")
             train_test_split = json.load(f_split)
             f_split.close()
@@ -117,7 +117,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
                     indices = indices[np.mod(indices, self.test_split_interval) == 0]
 
         self.indices = indices
-        print("Split: ", self.split, ", indices: ", indices)
+        logger.info(f"Split: {self.split}, indices: {indices}")
 
         self.cam_extrinsics = [self.cam_extrinsics[i] for i in np.where(indices)[0]]
         self.poses = self.poses[indices].astype(np.float32)
@@ -274,9 +274,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
                 with Image.open(image_path) as img:
                     width, height = img.size
             except FileNotFoundError:
-                logger.error(
-                    f"Image {image_path} not found. Cannot determine dimensions for intrinsic ID {intr.id}."
-                )
+                logger.error(f"Image {image_path} not found. Cannot determine dimensions for intrinsic ID {intr.id}.")
                 continue
 
             # Calculate scaling factor to match the image dimensions to the intrinsic dimensions
