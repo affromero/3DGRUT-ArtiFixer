@@ -140,7 +140,7 @@ def create_summary_writer(conf, object_name, out_dir, experiment_name, use_wandb
 
     assert out_dir is not None, "Output directory must be specified"
     out_dir = os.path.join(out_dir, experiment_name) if experiment_name else out_dir
-    out_dir = os.path.join(out_dir, run_name)
+    # out_dir = os.path.join(out_dir, run_name)
 
     if use_wandb:
         import wandb

@@ -13,8 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .dataset_colmap import ColmapDataset
 from .dataset_nerf import NeRFDataset
+from .dataset_colmap import ColmapDataset
 from .dataset_scannetpp import ScannetppDataset
 
 
@@ -39,12 +39,18 @@ def make(name: str, config, ray_jitter):
                 downsample_factor=config.dataset.downsample_factor,
                 test_split_interval=config.dataset.test_split_interval,
                 ray_jitter=ray_jitter,
+                selected_indices_file=config.selected_indices_file,
+                num_selected_indices=config.num_selected_indices,
+                train_test_split_file=config.train_test_split_file
             )
             val_dataset = ColmapDataset(
                 config.path,
                 split="val",
                 downsample_factor=config.dataset.downsample_factor,
                 test_split_interval=config.dataset.test_split_interval,
+                selected_indices_file=config.selected_indices_file,
+                num_selected_indices=config.num_selected_indices,
+                train_test_split_file=config.train_test_split_file
             )
         case "scannetpp":
             train_dataset = ScannetppDataset(
@@ -82,6 +88,9 @@ def make_test(name: str, config):
                 split="val",
                 downsample_factor=config.dataset.downsample_factor,
                 test_split_interval=config.dataset.test_split_interval,
+                selected_indices_file=config.selected_indices_file,
+                num_selected_indices=config.num_selected_indices,
+                train_test_split_file=config.train_test_split_file
             )
         case "scannetpp":
             dataset = ScannetppDataset(
