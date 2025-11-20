@@ -736,7 +736,7 @@ class MixtureOfGaussians(torch.nn.Module, ExportableModel):
         extra_f_names = sorted(extra_f_names, key=lambda x: int(x.split("_")[-1]))
         num_speculars = (self.max_n_features + 1) ** 2 - 1
         expected_extra_f_count = 3 * num_speculars
-        
+
         mogt_specular = np.zeros((num_gaussians, expected_extra_f_count))
         if len(extra_f_names) == expected_extra_f_count:
             # Full spherical harmonics data available
