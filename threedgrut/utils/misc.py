@@ -135,6 +135,7 @@ def jet_map(map: torch.Tensor, max_val: float) -> torch.Tensor:
 
 
 def create_summary_writer(conf, object_name, out_dir, experiment_name, use_wandb):
+    # Remove timestamp for better output folder organization
     run_name = f"{object_name}"
 
     assert out_dir is not None, "Output directory must be specified"

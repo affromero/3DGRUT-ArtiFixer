@@ -59,7 +59,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
         ray_jitter=None,
         selected_indices_file=None, # A json file with the first (or second) half ordered camera poses
         num_selected_indices=None, # Number of selected camera indices for sparse recon
-        train_test_split_file=None, # For mipnerf360 data format
+        train_test_split_file=None, # For mipnerf360 ReconFusion, a json file with train-test camera poses
     ):
         self.path = path
         self.device = device
@@ -132,6 +132,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
         self._worker_gpu_cache.clear()
 
     def load_intrinsics_and_extrinsics(self):
+        # Handle the different colmap binary files paths or directly load transforms.json
         try:
             if os.path.exists(os.path.join(self.path, "sparse/0", "images.bin")):
                 cameras_extrinsic_file = os.path.join(self.path, "sparse/0", "images.bin")
@@ -311,6 +312,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
             description=f"Load Dataset ({self.split})",
             color="salmon1",
         ):
+            # If there is no images.bin file, use transforms.json for initialization
             if not os.path.exists(os.path.join(self.path, "sparse/0", "images.bin")) and not os.path.exists(os.path.join(self.path, "colmap/sparse/0", "images.bin")):
                 c2w = np.array(extr['transform_matrix'])
                 W2C = np.zeros((4, 4), dtype=np.float32)
