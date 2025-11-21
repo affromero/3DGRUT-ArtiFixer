@@ -159,7 +159,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
                 self.cam_intrinsics = read_colmap_intrinsics_binary(cameras_intrinsic_file)
             except:
                 Camera = collections.namedtuple("Camera", ["id", "model", "width", "height", "params"])
-                params = (transforms_data['fl_x'], transforms_data['fl_y'], transforms_data['cx'], transforms_data['cy'])
+                params = (transforms_data['fl_x'], transforms_data['fl_y'], transforms_data['cx'], transforms_data['cy'], transforms_data['k1'], transforms_data['k2'], transforms_data['p1'], transforms_data['p2'])
                 self.cam_intrinsics = {1: Camera(
                     id=1,
                     model='OPENCV',
@@ -208,6 +208,37 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
                 params.to_dict(),
                 torch.tensor(rays_o_cam, dtype=torch.float32).reshape(out_shape),
                 torch.tensor(rays_d_cam, dtype=torch.float32).reshape(out_shape),
+                type(params).__name__,
+            )
+
+        # Define a function that considers radial and tangential distortions to generate rays_d vectors
+        def create_perspective_camera(params, w, h):
+            # Generate UV coordinates
+            u = np.tile(np.arange(w), h)
+            v = np.arange(h).repeat(w)
+            out_shape = (1, h, w, 3)
+            resolution = np.array([w, h]).astype(np.int64)
+            principal_point = params[2:4].astype(np.float32)
+            focal_length = params[0:2].astype(np.float32)
+            radial_coeffs = np.array([params[4], params[5], 0, 0, 0, 0]).astype(np.float32)
+            tangential_coeffs = params[6:8].astype(np.float32)
+            params = OpenCVPinholeCameraModelParameters(
+                resolution=resolution,
+                shutter_type=ShutterType.GLOBAL,
+                principal_point=principal_point,
+                focal_length=focal_length,
+                radial_coeffs=radial_coeffs,
+                tangential_coeffs=tangential_coeffs,
+                thin_prism_coeffs=np.zeros((4,), dtype=np.float32),
+            )
+            pixel_coords = torch.tensor(np.stack([u, v], axis=1), dtype=torch.int32)
+            image_points = pixels_to_image_points(pixel_coords)
+            rays_d_cam = params._image_points_to_camera_rays_impl(image_points)
+            rays_o_cam = torch.zeros_like(rays_d_cam)
+            return (
+                params.to_dict(),
+                rays_o_cam.to(torch.float32).reshape(out_shape),
+                rays_d_cam.to(torch.float32).reshape(out_shape),
                 type(params).__name__,
             )
 
@@ -285,10 +316,15 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
                 focal_length = intr.params[0] / scaling_factor
                 self.intrinsics[intr.id] = create_pinhole_camera(focal_length, focal_length, width, height)
 
-            elif intr.model == "PINHOLE" or intr.model == "OPENCV":
+            elif intr.model == "PINHOLE":
                 focal_length_x = intr.params[0] / scaling_factor
                 focal_length_y = intr.params[1] / scaling_factor
                 self.intrinsics[intr.id] = create_pinhole_camera(focal_length_x, focal_length_y, width, height)
+
+            elif intr.model == "OPENCV": # DL3DV and nerfbuster are using OPENCV camera model
+                params = copy.deepcopy(intr.params)
+                params[:4] = params[:4] / scaling_factor
+                self.intrinsics[intr.id] = create_perspective_camera(params, width, height)
 
             elif intr.model == "OPENCV_FISHEYE":
                 params = copy.deepcopy(intr.params)

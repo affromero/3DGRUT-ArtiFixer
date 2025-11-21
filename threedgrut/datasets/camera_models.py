@@ -84,6 +84,77 @@ class OpenCVPinholeCameraModelParameters(CameraModelParameters, dataclasses_json
         assert self.thin_prism_coeffs.shape == (4,)
         assert self.thin_prism_coeffs.dtype == np.dtype("float32")
 
+    # Borrow the _image_points_to_camera_rays_impl from ncore
+    def _image_points_to_camera_rays_impl(self, image_points: torch.Tensor) -> torch.Tensor:
+        """
+        Computes the camera ray for each image point, performing an iterative undistortion of the nonlinear distortion model
+        """
+
+        # image_points = to_torch(
+        #     image_points,
+        #     device=self.device,
+        # )
+        # assert image_points.is_floating_point(), "[CameraModel]: image_points must be floating point values"
+        # image_points = image_points.to(self.dtype)
+
+        camera_rays2 = self.__iterative_undistort(image_points)
+        camera_rays3 = torch.cat([camera_rays2, torch.ones_like(camera_rays2[:, :1])], dim=1)
+
+        # make sure rays are normalized
+        return camera_rays3 / torch.linalg.norm(camera_rays3, axis=1, keepdims=True)
+
+    def __compute_distortion(self, xy: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Computes the radial, tangential, and thin-prism distortion given the camera rays"""
+
+        # Compute the helper variables
+        xy_squared = torch.square(xy)
+        r_2 = torch.sum(xy_squared, dim=1)
+        xy_prod = xy[:, 0] * xy[:, 1]
+        a1 = 2 * xy_prod
+        a2 = r_2 + 2 * xy_squared[:, 0]
+        a3 = r_2 + 2 * xy_squared[:, 1]
+
+        icD_numerator = 1.0 + r_2 * (
+            self.radial_coeffs[0] + r_2 * (self.radial_coeffs[1] + r_2 * self.radial_coeffs[2])
+        )
+        icD_denominator = 1.0 + r_2 * (
+            self.radial_coeffs[3] + r_2 * (self.radial_coeffs[4] + r_2 * self.radial_coeffs[5])
+        )
+        icD = icD_numerator / icD_denominator
+
+        delta_x = (
+            self.tangential_coeffs[0] * a1
+            + self.tangential_coeffs[1] * a2
+            + r_2 * (self.thin_prism_coeffs[0] + r_2 * self.thin_prism_coeffs[1])
+        )
+        delta_y = (
+            self.tangential_coeffs[0] * a3
+            + self.tangential_coeffs[1] * a1
+            + r_2 * (self.thin_prism_coeffs[2] + r_2 * self.thin_prism_coeffs[3])
+        )
+
+        return icD, delta_x, delta_y, r_2
+
+    def __iterative_undistort(
+        self, image_points: torch.Tensor, stop_mean_of_squares_error_px2: float = 1e-12, max_iterations: int = 10
+    ) -> torch.Tensor:
+        # start by unprojecting points to rays using distortion-less ideal pinhole model only
+        cam_rays_0 = (image_points - self.principal_point) / self.focal_length
+
+        cam_rays = cam_rays_0
+        for _ in range(max_iterations):
+            # apply *inverse* of distortion to camera rays to iteratively find the rays that correspond to the *distorted* source points
+            icD, delta_x, delta_y, _ = self.__compute_distortion(cam_rays)
+
+            residual = cam_rays - (
+                cam_rays := (cam_rays_0 - torch.cat([delta_x[:, None], delta_y[:, None]], dim=1)) / icD[:, None]
+            )
+
+            if torch.mean(torch.square(residual)).item() <= stop_mean_of_squares_error_px2:
+                break
+
+        return cam_rays
+
 
 @dataclass
 class OpenCVFisheyeCameraModelParameters(CameraModelParameters, dataclasses_json.DataClassJsonMixin):

@@ -149,7 +149,11 @@ class Renderer:
             }
 
         output_path_renders = os.path.join(self.out_dir, f"ours_{int(self.global_step)}", "renders")
+        output_path_opacity = os.path.join(self.out_dir, f"ours_{int(self.global_step)}", "opacity")
+        output_path_depth = os.path.join(self.out_dir, f"ours_{int(self.global_step)}", "depth")
         os.makedirs(output_path_renders, exist_ok=True)
+        os.makedirs(output_path_opacity, exist_ok=True)
+        os.makedirs(output_path_depth, exist_ok=True)
 
         if self.save_gt:
             output_path_gt = os.path.join(self.out_dir, f"ours_{int(self.global_step)}", "gt")
@@ -181,12 +185,22 @@ class Renderer:
             outputs = self.model(gpu_batch)
 
             pred_rgb_full = outputs["pred_rgb"]
+            pred_opacity_full = outputs["pred_opacity"]
+            pred_dist_full = outputs["pred_dist"]
             rgb_gt_full = gpu_batch.rgb_gt
 
             # The values are already alpha composited with the background
             torchvision.utils.save_image(
                 pred_rgb_full.squeeze(0).permute(2, 0, 1),
                 os.path.join(output_path_renders, "{0:05d}".format(iteration) + ".png"),
+            )
+            torchvision.utils.save_image(
+                pred_opacity_full.squeeze(0).permute(2, 0, 1),
+                os.path.join(output_path_opacity, "{0:05d}".format(iteration) + ".png"),
+            )
+            torchvision.utils.save_image(
+                pred_dist_full.squeeze(0).permute(2, 0, 1),
+                os.path.join(output_path_depth, "{0:05d}".format(iteration) + ".png"),
             )
             pred_img_to_write = pred_rgb_full[-1].clip(0, 1.0)
             gt_img_to_write = rgb_gt_full[-1].clip(0, 1.0)
