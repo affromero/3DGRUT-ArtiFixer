@@ -89,14 +89,6 @@ class OpenCVPinholeCameraModelParameters(CameraModelParameters, dataclasses_json
         """
         Computes the camera ray for each image point, performing an iterative undistortion of the nonlinear distortion model
         """
-
-        # image_points = to_torch(
-        #     image_points,
-        #     device=self.device,
-        # )
-        # assert image_points.is_floating_point(), "[CameraModel]: image_points must be floating point values"
-        # image_points = image_points.to(self.dtype)
-
         camera_rays2 = self.__iterative_undistort(image_points)
         camera_rays3 = torch.cat([camera_rays2, torch.ones_like(camera_rays2[:, :1])], dim=1)
 
