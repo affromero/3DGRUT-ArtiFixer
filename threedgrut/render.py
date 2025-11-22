@@ -198,9 +198,9 @@ class Renderer:
                 pred_opacity_full.squeeze(0).permute(2, 0, 1),
                 os.path.join(output_path_opacity, "{0:05d}".format(iteration) + ".png"),
             )
-            torchvision.utils.save_image(
-                pred_dist_full.squeeze(0).permute(2, 0, 1),
-                os.path.join(output_path_depth, "{0:05d}".format(iteration) + ".png"),
+            np.save(
+                os.path.join(output_path_depth, "{0:05d}".format(iteration)),
+                pred_dist_full.squeeze(0).detach().cpu().numpy(),
             )
             pred_img_to_write = pred_rgb_full[-1].clip(0, 1.0)
             gt_img_to_write = rgb_gt_full[-1].clip(0, 1.0)
