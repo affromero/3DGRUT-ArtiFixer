@@ -464,7 +464,10 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
         return self.poses
 
     def get_intrinsics_idx(self, extr_idx: int):
-        return self.cam_extrinsics[extr_idx].camera_id
+        try:
+            return self.cam_extrinsics[extr_idx].camera_id
+        except:
+            return 1
 
     def __len__(self) -> int:
         return self.n_frames
