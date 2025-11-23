@@ -27,6 +27,7 @@ import threedgrut.datasets as datasets
 from threedgrut.model.model import MixtureOfGaussians
 from threedgrut.utils.logger import logger
 from threedgrut.utils.misc import create_summary_writer
+from PIL import Image
 
 
 class Renderer:
@@ -194,10 +195,7 @@ class Renderer:
                 pred_rgb_full.squeeze(0).permute(2, 0, 1),
                 os.path.join(output_path_renders, "{0:05d}".format(iteration) + ".png"),
             )
-            torchvision.utils.save_image(
-                pred_opacity_full.squeeze(0).permute(2, 0, 1),
-                os.path.join(output_path_opacity, "{0:05d}".format(iteration) + ".png"),
-            )
+            Image.fromarray((pred_opacity_full * 255).round().byte().squeeze().detach().cpu().numpy()).save(os.path.join(output_path_opacity, "{0:05d}".format(iteration) + ".png"))
             np.save(
                 os.path.join(output_path_depth, "{0:05d}".format(iteration)),
                 pred_dist_full.squeeze(0).detach().cpu().numpy(),
