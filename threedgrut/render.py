@@ -96,6 +96,8 @@ class Renderer:
         conf["render"]["enable_kernel_timings"] = True
 
         object_name = Path(conf.path).stem
+        if object_name == "nerfstudio": # DL3DV Benchmark dataset path always ends in nerfstudio parent directory name is more useful
+            object_name = Path(conf.path).parent.stem
         experiment_name = conf["experiment_name"]
         writer, out_dir, run_name = create_summary_writer(conf, object_name, out_dir, experiment_name, use_wandb=False)
 
