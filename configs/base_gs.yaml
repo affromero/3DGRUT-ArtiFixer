@@ -14,7 +14,7 @@ gui_update_from_device: true
 val_frequency: 5000
 num_workers: 24
 use_wandb: false
-wandb_project: "3dgrt"
+wandb_project: "dreamfix_3dgrut"
 test_last: true
 validate_first: false
 log_frequency: 1
