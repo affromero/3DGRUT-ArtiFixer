@@ -85,7 +85,7 @@ def make_test(name: str, config):
         case "colmap":
             dataset = ColmapDataset(
                 config.path,
-                split="test",
+                split="test", # test mode to ensure we render all the images regardless of the selected indices
                 downsample_factor=config.dataset.downsample_factor,
                 test_split_interval=config.dataset.test_split_interval,
                 selected_indices_file=config.selected_indices_file, # A json file with the first (or second) half ordered camera poses
