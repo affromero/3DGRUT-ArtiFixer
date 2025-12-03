@@ -16,6 +16,8 @@
 import copy
 import os
 import platform
+import json
+import collections
 
 import numpy as np
 import torch
@@ -55,6 +57,9 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
         downsample_factor=1,
         test_split_interval=8,
         ray_jitter=None,
+        selected_indices_file=None, # A json file with the first (or second) half ordered camera poses
+        num_selected_indices=None, # Number of selected camera indices for sparse recon
+        train_test_split_file=None, # For mipnerf360 ReconFusion, a json file with train-test camera poses
     ):
         self.path = path
         self.device = device
@@ -62,6 +67,9 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
         self.downsample_factor = downsample_factor
         self.ray_jitter = ray_jitter
         self.test_split_interval = test_split_interval
+        self.selected_indices_file=selected_indices_file
+        self.num_selected_indices=num_selected_indices
+        self.train_test_split_file=train_test_split_file
 
         # Worker-based GPU cache for multiprocessing compatibility
         self._worker_gpu_cache = {}
@@ -79,16 +87,40 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
         self.load_camera_data()
         indices = np.arange(self.n_frames)
 
+        # If selected_indices_file is set, load the file and use num_selected_indices to select training set
+        if self.selected_indices_file is not None:
+            logger.info(f"self.selected_indices_file: {self.selected_indices_file}")
+            with open(self.selected_indices_file, "r") as f:
+                selected_indices = json.load(f)
+            if self.split == "train":
+                indices = selected_indices[:self.num_selected_indices]
+            else:
+                indices = np.setdiff1d(indices, selected_indices[:self.num_selected_indices])
+        # If train_test_split_file (for mipnerf360) is set, load the file and use num_selected_indices to select training set
+        elif self.train_test_split_file is not None:
+            logger.info(f"self.train_test_split_file: {self.train_test_split_file}")
+            f_split = open(self.train_test_split_file, "r")
+            train_test_split = json.load(f_split)
+            f_split.close()
+            if self.split == "train":
+                indices = np.array(train_test_split['train_ids'])
+            else:
+                indices = np.array(train_test_split['test_ids'])
         # If test_split_interval is set, every test_split_interval frame will be excluded from the training set
         # If test_split_interval is non-positive, all images will be used for training and testing
-        if self.test_split_interval > 0:
-            if self.split == "train":
-                indices = np.mod(indices, self.test_split_interval) != 0
-            else:
-                indices = np.mod(indices, self.test_split_interval) == 0
+        else:
+            if self.test_split_interval > 0:
+                if self.split == "train":
+                    indices = indices[np.mod(indices, self.test_split_interval) != 0]
+                else:
+                    indices = indices[np.mod(indices, self.test_split_interval) == 0]
 
-        self.cam_extrinsics = [self.cam_extrinsics[i] for i in np.where(indices)[0]]
+        logger.info(f"Split: {self.split}, indices: {indices}")
+
+        self.indices = indices
+        self.cam_extrinsics = [self.cam_extrinsics[i] for i in indices]
         self.poses = self.poses[indices].astype(np.float32)
+        self.w2cs = self.w2cs[indices]
         self.image_paths = self.image_paths[indices]  # numpy str array of image paths
         self.camera_centers = self.camera_centers[indices]
         self.center, self.length_scale, self.scene_bbox = self.compute_spatial_extents()
@@ -100,11 +132,41 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
         self._worker_gpu_cache.clear()
 
     def load_intrinsics_and_extrinsics(self):
+        # Handle the different colmap binary files paths or directly load transforms.json
         try:
-            cameras_extrinsic_file = os.path.join(self.path, "sparse/0", "images.bin")
-            cameras_intrinsic_file = os.path.join(self.path, "sparse/0", "cameras.bin")
-            self.cam_extrinsics = read_colmap_extrinsics_binary(cameras_extrinsic_file)
-            self.cam_intrinsics = read_colmap_intrinsics_binary(cameras_intrinsic_file)
+            if os.path.exists(os.path.join(self.path, "sparse/0", "images.bin")):
+                cameras_extrinsic_file = os.path.join(self.path, "sparse/0", "images.bin")
+                self.cam_extrinsics = read_colmap_extrinsics_binary(cameras_extrinsic_file)
+            elif os.path.exists(os.path.join(self.path, "colmap/sparse/0", "images.bin")):
+                cameras_extrinsic_file = os.path.join(self.path, "colmap/sparse/0", "images.bin")
+                self.cam_extrinsics = read_colmap_extrinsics_binary(cameras_extrinsic_file)
+            else:
+                cameras_extrinsic_file = os.path.join(self.path, "transforms.json")
+                f_transforms = open(cameras_extrinsic_file, "r")
+                transforms_data = json.load(f_transforms)
+                self.cam_extrinsics = transforms_data["frames"]
+                if 'applied_transform' in transforms_data:
+                    self.applied_transform = np.array(transforms_data['applied_transform'] + [[0.0, 0.0, 0.0, 1.0]]).astype(np.float32)
+                else:
+                    self.applied_transform = np.eye(4).astype(np.float32)
+                f_transforms.close()
+
+            try:
+                if os.path.exists(os.path.join(self.path, "colmap/sparse/0", "cameras.bin")):
+                    cameras_intrinsic_file = os.path.join(self.path, "colmap/sparse/0", "cameras.bin")
+                else:
+                    cameras_intrinsic_file = os.path.join(self.path, "sparse/0", "cameras.bin")
+                self.cam_intrinsics = read_colmap_intrinsics_binary(cameras_intrinsic_file)
+            except:
+                Camera = collections.namedtuple("Camera", ["id", "model", "width", "height", "params"])
+                params = (transforms_data['fl_x'], transforms_data['fl_y'], transforms_data['cx'], transforms_data['cy'], transforms_data['k1'], transforms_data['k2'], transforms_data['p1'], transforms_data['p2'])
+                self.cam_intrinsics = {1: Camera(
+                    id=1,
+                    model='OPENCV',
+                    width=transforms_data['w'],
+                    height=transforms_data['h'],
+                    params=np.array(params),
+                )}
         except:
             cameras_extrinsic_file = os.path.join(self.path, "sparse/0", "images.txt")
             cameras_intrinsic_file = os.path.join(self.path, "sparse/0", "cameras.txt")
@@ -149,6 +211,37 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
                 type(params).__name__,
             )
 
+        # Define a function that considers radial and tangential distortions to generate rays_d vectors
+        def create_perspective_camera(params, w, h):
+            # Generate UV coordinates
+            u = np.tile(np.arange(w), h)
+            v = np.arange(h).repeat(w)
+            out_shape = (1, h, w, 3)
+            resolution = np.array([w, h]).astype(np.int64)
+            principal_point = params[2:4].astype(np.float32)
+            focal_length = params[0:2].astype(np.float32)
+            radial_coeffs = np.array([params[4], params[5], 0, 0, 0, 0]).astype(np.float32)
+            tangential_coeffs = params[6:8].astype(np.float32)
+            params = OpenCVPinholeCameraModelParameters(
+                resolution=resolution,
+                shutter_type=ShutterType.GLOBAL,
+                principal_point=principal_point,
+                focal_length=focal_length,
+                radial_coeffs=radial_coeffs,
+                tangential_coeffs=tangential_coeffs,
+                thin_prism_coeffs=np.zeros((4,), dtype=np.float32),
+            )
+            pixel_coords = torch.tensor(np.stack([u, v], axis=1), dtype=torch.int32)
+            image_points = pixels_to_image_points(pixel_coords)
+            rays_d_cam = params._image_points_to_camera_rays_impl(image_points)
+            rays_o_cam = torch.zeros_like(rays_d_cam)
+            return (
+                params.to_dict(),
+                rays_o_cam.to(torch.float32).reshape(out_shape),
+                rays_d_cam.to(torch.float32).reshape(out_shape),
+                type(params).__name__,
+            )
+
         def create_fisheye_camera(params, w, h):
             # Generate UV coordinates
             u = np.tile(np.arange(w), h)
@@ -183,7 +276,13 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
                 type(params).__name__,
             )
 
-        cam_id_to_image_name = {extr.camera_id: extr.name for extr in self.cam_extrinsics}
+        if not os.path.exists(os.path.join(self.path, "sparse/0", "images.bin")) and not os.path.exists(os.path.join(self.path, "colmap/sparse/0", "images.bin")):
+            cam_id_to_image_name = {
+                # extr.camera_id: extr.name for extr in self.cam_extrinsics
+                1: extr['file_path'].split("/")[-1] for extr in self.cam_extrinsics
+            }
+        else:
+            cam_id_to_image_name = {extr.camera_id: extr.name for extr in self.cam_extrinsics}
 
         for intr in self.cam_intrinsics.values():
             full_width = intr.width
@@ -222,6 +321,11 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
                 focal_length_y = intr.params[1] / scaling_factor
                 self.intrinsics[intr.id] = create_pinhole_camera(focal_length_x, focal_length_y, width, height)
 
+            elif intr.model == "OPENCV": # DL3DV and nerfbuster are using OPENCV camera model
+                params = copy.deepcopy(intr.params)
+                params[:4] = params[:4] / scaling_factor
+                self.intrinsics[intr.id] = create_perspective_camera(params, width, height)
+
             elif intr.model == "OPENCV_FISHEYE":
                 params = copy.deepcopy(intr.params)
                 params[:4] = params[:4] / scaling_factor
@@ -234,6 +338,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
 
         # Load poses and paths
         self.poses = []
+        self.w2cs = []
         self.image_paths = []
         self.mask_paths = []
 
@@ -243,27 +348,49 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
             description=f"Load Dataset ({self.split})",
             color="salmon1",
         ):
-            R = qvec_to_so3(extr.qvec)
-            T = np.array(extr.tvec)
-            W2C = np.zeros((4, 4), dtype=np.float32)
-            W2C[:3, 3] = T
-            W2C[:3, :3] = R
-            W2C[3, 3] = 1.0
-            C2W = np.linalg.inv(W2C)
-            self.poses.append(C2W)
-            cam_centers.append(C2W[:3, 3])
+            # If there is no images.bin file, use transforms.json for initialization
+            if not os.path.exists(os.path.join(self.path, "sparse/0", "images.bin")) and not os.path.exists(os.path.join(self.path, "colmap/sparse/0", "images.bin")):
+                c2w = np.array(extr['transform_matrix'])
+                W2C = np.zeros((4, 4), dtype=np.float32)
+                W2C[:3, :3] = c2w[:3, :3].T
+                W2C[:3, 3] = -c2w[:3, :3].T @ c2w[:3, 3]
+                W2C[-1, -1] = 1.0
+                W2C = W2C @ self.applied_transform
+                W2C[1:3, :] *= -1
+                C2W = np.linalg.inv(W2C)
+                self.poses.append(C2W)
+                self.w2cs.append(W2C)
+                cam_centers.append(C2W[:3, 3])
 
-            image_path = os.path.join(self.path, self.get_images_folder(), extr.name)
-            self.image_paths.append(image_path)
+                image_path = os.path.join(self.path, self.get_images_folder(), extr["file_path"].split("/")[-1])
+                self.image_paths.append(image_path)
 
-            # Mask path
-            self.mask_paths.append(os.path.splitext(image_path)[0] + "_mask.png")
+                # Mask path
+                self.mask_paths.append(os.path.splitext(image_path)[0] + "_mask.png")
+            else:
+                R = qvec_to_so3(extr.qvec)
+                T = np.array(extr.tvec)
+                W2C = np.zeros((4, 4), dtype=np.float32)
+                W2C[:3, 3] = T
+                W2C[:3, :3] = R
+                W2C[3, 3] = 1.0
+                C2W = np.linalg.inv(W2C)
+                self.poses.append(C2W)
+                self.w2cs.append(W2C)
+                cam_centers.append(C2W[:3, 3])
+
+                image_path = os.path.join(self.path, self.get_images_folder(), extr.name)
+                self.image_paths.append(image_path)
+
+                # Mask path
+                self.mask_paths.append(os.path.splitext(image_path)[0] + "_mask.png")
 
         self.camera_centers = np.array(cam_centers)
         _, diagonal = get_center_and_diag(self.camera_centers)
         self.cameras_extent = diagonal * 1.1
 
         self.poses = np.stack(self.poses)
+        self.w2cs = np.stack(self.w2cs)
         self.image_paths = np.stack(self.image_paths, dtype=str)
         self.mask_paths = np.stack(self.mask_paths, dtype=str)
 
@@ -337,7 +464,10 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
         return self.poses
 
     def get_intrinsics_idx(self, extr_idx: int):
-        return self.cam_extrinsics[extr_idx].camera_id
+        try:
+            return self.cam_extrinsics[extr_idx].camera_id
+        except:
+            return 1
 
     def __len__(self) -> int:
         return self.n_frames
