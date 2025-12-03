@@ -16,6 +16,7 @@
 import os
 from pathlib import Path
 
+import json
 import numpy as np
 import torch
 import torchvision
@@ -32,7 +33,7 @@ from PIL import Image
 
 class Renderer:
     def __init__(
-        self, model, conf, global_step, out_dir, path="", save_gt=True, writer=None, compute_extra_metrics=True
+        self, model, conf, global_step, out_dir, path="", save_gt=True, writer=None, compute_extra_metrics=True, save_selected_indices=True
     ) -> None:
 
         if path:  # Replace the path to the test data
@@ -47,6 +48,7 @@ class Renderer:
         self.dataset, self.dataloader = self.create_test_dataloader(conf)
         self.writer = writer
         self.compute_extra_metrics = compute_extra_metrics
+        self.save_selected_indices = save_selected_indices
 
         if conf.model.background.color == "black":
             self.bg_color = torch.zeros((3,), dtype=torch.float32, device="cuda")
@@ -59,6 +61,7 @@ class Renderer:
         """Create the test dataloader for the given configuration."""
         from threedgrut.datasets.utils import configure_dataloader_for_platform
 
+        # test mode to ensure we render all the images regardless of the selected indices in ColmapDataset
         dataset = datasets.make_test(name=conf.dataset.type, config=conf)
 
         # Configure DataLoader arguments for the current platform
@@ -83,7 +86,7 @@ class Renderer:
         If model is None, it will be loaded base on the
         """
 
-        checkpoint = torch.load(checkpoint_path)
+        checkpoint = torch.load(checkpoint_path, weights_only=False)
         global_step = checkpoint["global_step"]
 
         conf = checkpoint["config"]
@@ -94,6 +97,8 @@ class Renderer:
         conf["render"]["enable_kernel_timings"] = True
 
         object_name = Path(conf.path).stem
+        if object_name == "nerfstudio": # DL3DV Benchmark dataset path always ends in nerfstudio parent directory name is more useful
+            object_name = Path(conf.path).parent.stem
         experiment_name = conf["experiment_name"]
         writer, out_dir, run_name = create_summary_writer(conf, object_name, out_dir, experiment_name, use_wandb=False)
 
@@ -155,6 +160,15 @@ class Renderer:
         os.makedirs(output_path_renders, exist_ok=True)
         os.makedirs(output_path_opacity, exist_ok=True)
         os.makedirs(output_path_depth, exist_ok=True)
+
+        if self.save_selected_indices:
+            output_path_selected_indices = os.path.join(self.out_dir, f"ours_{int(self.global_step)}", "selected_indices.json")
+            with open(self.dataset.selected_indices_file, "r") as f:
+                selected_indices = json.load(f)
+            indices = selected_indices[:self.dataset.num_selected_indices]
+            
+            with open(output_path_selected_indices, "w") as f:
+                json.dump(indices, f)
 
         if self.save_gt:
             output_path_gt = os.path.join(self.out_dir, f"ours_{int(self.global_step)}", "gt")

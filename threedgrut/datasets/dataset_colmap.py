@@ -94,8 +94,9 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
                 selected_indices = json.load(f)
             if self.split == "train":
                 indices = selected_indices[:self.num_selected_indices]
-            else:
+            elif self.split == "val":
                 indices = np.setdiff1d(indices, selected_indices[:self.num_selected_indices])
+
         # If train_test_split_file (for mipnerf360) is set, load the file and use num_selected_indices to select training set
         elif self.train_test_split_file is not None:
             logger.info(f"self.train_test_split_file: {self.train_test_split_file}")

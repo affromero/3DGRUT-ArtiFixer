@@ -310,6 +310,8 @@ class Trainer3DGRUT:
     def init_experiments_tracking(self, conf: DictConfig):
         # Initialize the tensorboard writer
         object_name = Path(conf.path).stem
+        if object_name == "nerfstudio": # DL3DV Benchmark dataset path always ends in nerfstudio parent directory name is more useful
+            object_name = Path(conf.path).parent.stem
         writer, out_dir, run_name = create_summary_writer(
             conf, object_name, conf.out_dir, conf.experiment_name, conf.use_wandb
         )

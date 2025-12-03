@@ -1,0 +1,7 @@
+# @package _global_
+
+# order in which configs override each other (/* - denotes a relative search path)
+defaults:
+  - colmap_3dgut_sparse.yaml
+  - override /strategy: mcmc
+  - _self_
