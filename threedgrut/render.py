@@ -33,7 +33,7 @@ from PIL import Image
 
 class Renderer:
     def __init__(
-        self, model, conf, global_step, out_dir, path="", save_gt=True, writer=None, compute_extra_metrics=True, save_selected_indices=True
+        self, model, conf, global_step, out_dir, path="", save_gt=True, writer=None, compute_extra_metrics=True, save_selected_indices=None
     ) -> None:
 
         if path:  # Replace the path to the test data
@@ -48,7 +48,7 @@ class Renderer:
         self.dataset, self.dataloader = self.create_test_dataloader(conf)
         self.writer = writer
         self.compute_extra_metrics = compute_extra_metrics
-        self.save_selected_indices = save_selected_indices
+        self.save_selected_indices = save_selected_indices if save_selected_indices is not None else self.dataset.selected_indices_file is not None
 
         if conf.model.background.color == "black":
             self.bg_color = torch.zeros((3,), dtype=torch.float32, device="cuda")

@@ -3,6 +3,6 @@ defaults:
   - _self_
 
 novel_path: ""
-selected_indices_file: ""
-train_test_split_file: ""
+selected_indices_file: null
+train_test_split_file: null
 num_selected_indices: 1000000
