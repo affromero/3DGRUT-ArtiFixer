@@ -5,4 +5,5 @@ defaults:
 novel_path: null
 selected_indices_file: null
 train_test_split_file: null
+image_path_override: null
 num_selected_indices: 1000000
