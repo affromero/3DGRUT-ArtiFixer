@@ -60,6 +60,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
         selected_indices_file=None, # A json file with the first (or second) half ordered camera poses
         num_selected_indices=None, # Number of selected camera indices for sparse recon
         train_test_split_file=None, # For mipnerf360 ReconFusion, a json file with train-test camera poses
+        image_path_override=None, # Override the image path
     ):
         self.path = path
         self.device = device
@@ -70,7 +71,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
         self.selected_indices_file=selected_indices_file
         self.num_selected_indices=num_selected_indices
         self.train_test_split_file=train_test_split_file
-
+        self.image_path_override=image_path_override
         # Worker-based GPU cache for multiprocessing compatibility
         self._worker_gpu_cache = {}
 
@@ -84,18 +85,23 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
         # Get the scene data
         self.load_intrinsics_and_extrinsics()
         self.n_frames = len(self.cam_extrinsics)
-        self.load_camera_data()
         indices = np.arange(self.n_frames)
 
+        # Compute selected indices before load_camera_data (needed for image_path_override)
+        self.override_indices = set()  # Selected indices use original path; rest use image_path_override
+        
         # If selected_indices_file is set, load the file and use num_selected_indices to select training set
         if self.selected_indices_file is not None:
             logger.info(f"self.selected_indices_file: {self.selected_indices_file}")
             with open(self.selected_indices_file, "r") as f:
                 selected_indices = json.load(f)
             if self.split == "train":
-                indices = selected_indices[:self.num_selected_indices]
+                self.override_indices = set(selected_indices[:self.num_selected_indices])
+                if self.image_path_override is None:
+                    indices = selected_indices[:self.num_selected_indices]
             elif self.split == "val":
-                indices = np.setdiff1d(indices, selected_indices[:self.num_selected_indices])
+                if self.image_path_override is None:
+                    indices = np.setdiff1d(indices, selected_indices[:self.num_selected_indices])
 
         # If train_test_split_file (for mipnerf360) is set, load the file and use num_selected_indices to select training set
         elif self.train_test_split_file is not None:
@@ -104,17 +110,26 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
             train_test_split = json.load(f_split)
             f_split.close()
             if self.split == "train":
-                indices = np.array(train_test_split['train_ids'])
+                self.override_indices = set(train_test_split['train_ids'])
+                if self.image_path_override is None:
+                    indices = np.array(train_test_split['train_ids'])
             else:
-                indices = np.array(train_test_split['test_ids'])
+                if self.image_path_override is None:
+                    indices = np.array(train_test_split['test_ids'])
         # If test_split_interval is set, every test_split_interval frame will be excluded from the training set
         # If test_split_interval is non-positive, all images will be used for training and testing
         else:
             if self.test_split_interval > 0:
                 if self.split == "train":
-                    indices = indices[np.mod(indices, self.test_split_interval) != 0]
+                    train_indices = indices[np.mod(indices, self.test_split_interval) != 0]
+                    self.override_indices = set(train_indices)
+                    if self.image_path_override is None:
+                        indices = train_indices
                 else:
-                    indices = indices[np.mod(indices, self.test_split_interval) == 0]
+                    if self.image_path_override is None:
+                        indices = indices[np.mod(indices, self.test_split_interval) == 0]
+
+        self.load_camera_data()
 
         logger.info(f"Split: {self.split}, indices: {indices}")
 
@@ -290,11 +305,13 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
             full_height = intr.height
 
             image_name = cam_id_to_image_name[intr.id]
+            # Use original images folder for dimension checking (dimensions are the same)
+            downsample_suffix = "" if self.downsample_factor == 1 else f"_{self.downsample_factor}"
+            images_folder = f"images{downsample_suffix}"
             image_name = (
-                os.path.join(os.path.split(image_name)[1], "") if self.get_images_folder() in image_name else image_name
+                os.path.join(os.path.split(image_name)[1], "") if images_folder in image_name else image_name
             )
-            image_path = os.path.join(self.path, self.get_images_folder(), image_name)
-
+            image_path = os.path.join(self.path, images_folder, image_name)
             try:
                 # Load the image to get its actual dimensions
                 with Image.open(image_path) as img:
@@ -344,11 +361,14 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
         self.mask_paths = []
 
         cam_centers = []
-        for extr in logger.track(
+        for frame_idx, extr in enumerate(logger.track(
             self.cam_extrinsics,
             description=f"Load Dataset ({self.split})",
             color="salmon1",
-        ):
+        )):
+            # Check if this frame should use override path (non-selected frames use override)
+            use_override = self.image_path_override is not None and frame_idx not in self.override_indices
+            
             # If there is no images.bin file, use transforms.json for initialization
             if not os.path.exists(os.path.join(self.path, "sparse/0", "images.bin")) and not os.path.exists(os.path.join(self.path, "colmap/sparse/0", "images.bin")):
                 c2w = np.array(extr['transform_matrix'])
@@ -363,7 +383,12 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
                 self.w2cs.append(W2C)
                 cam_centers.append(C2W[:3, 3])
 
-                image_path = os.path.join(self.path, self.get_images_folder(), extr["file_path"].split("/")[-1])
+                img_rel_path = extr["file_path"].split("/")[-1]
+                if use_override:
+                    img_rel_path = f"{frame_idx:04d}.png"
+                    image_path = os.path.join(self.path, self.image_path_override, img_rel_path)
+                else:
+                    image_path = os.path.join(self.path, self.get_images_folder(), img_rel_path)
                 self.image_paths.append(image_path)
 
                 # Mask path
@@ -380,7 +405,12 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
                 self.w2cs.append(W2C)
                 cam_centers.append(C2W[:3, 3])
 
-                image_path = os.path.join(self.path, self.get_images_folder(), extr.name)
+                img_rel_path = extr.name.split("/")[-1]
+                if use_override:
+                    img_rel_path = f"{frame_idx:04d}.png"
+                    image_path = os.path.join(self.path, self.image_path_override, img_rel_path)
+                else:
+                    image_path = os.path.join(self.path, self.get_images_folder(), img_rel_path)
                 self.image_paths.append(image_path)
 
                 # Mask path
