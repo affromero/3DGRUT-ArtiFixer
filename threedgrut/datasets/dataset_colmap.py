@@ -60,7 +60,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
         selected_indices_file=None, # A json file with the first (or second) half ordered camera poses
         num_selected_indices=None, # Number of selected camera indices for sparse recon
         train_test_split_file=None, # For mipnerf360 ReconFusion, a json file with train-test camera poses
-        image_path_override=None, # Override the image path (to distill renderings in training)
+        image_path_override=None, # Override the image path
     ):
         self.path = path
         self.device = device
@@ -385,8 +385,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
 
                 img_rel_path = extr["file_path"].split("/")[-1]
                 if use_override:
-                    img_idx = int(img_rel_path.replace("frame_", "").split(".")[0])-1
-                    img_rel_path = f"{img_idx:04d}.png"
+                    img_rel_path = f"{frame_idx:04d}.png"
                     image_path = os.path.join(self.path, self.image_path_override, img_rel_path)
                 else:
                     image_path = os.path.join(self.path, self.get_images_folder(), img_rel_path)
@@ -408,8 +407,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
 
                 img_rel_path = extr.name.split("/")[-1]
                 if use_override:
-                    img_idx = int(img_rel_path.replace("frame_", "").split(".")[0])-1
-                    img_rel_path = f"{img_idx:04d}.png"
+                    img_rel_path = f"{frame_idx:04d}.png"
                     image_path = os.path.join(self.path, self.image_path_override, img_rel_path)
                 else:
                     image_path = os.path.join(self.path, self.get_images_folder(), img_rel_path)
