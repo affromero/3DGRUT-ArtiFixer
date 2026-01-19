@@ -139,6 +139,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
         self.w2cs = self.w2cs[indices]
         self.image_paths = self.image_paths[indices]  # numpy str array of image paths
         self.camera_centers = self.camera_centers[indices]
+        self.is_override_flags = self.is_override_flags[indices]  # Filter override flags by split
         self.center, self.length_scale, self.scene_bbox = self.compute_spatial_extents()
 
         # Update the number of frames to only include the samples from the split
@@ -424,6 +425,12 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
         self.w2cs = np.stack(self.w2cs)
         self.image_paths = np.stack(self.image_paths, dtype=str)
         self.mask_paths = np.stack(self.mask_paths, dtype=str)
+        
+        # Track which frames use override images (for applying different loss)
+        self.is_override_flags = np.array([
+            self.image_path_override is not None and frame_idx not in self.override_indices
+            for frame_idx in range(len(self.cam_extrinsics))
+        ], dtype=bool)
 
     def _lazy_worker_intrinsics_cache(self):
         """Create intrinsics cache for a specific worker."""
@@ -517,6 +524,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
             "data": torch.tensor(image_data).unsqueeze(0),
             "pose": torch.tensor(self.poses[idx]).unsqueeze(0),
             "intr": self.get_intrinsics_idx(idx),
+            "is_override": bool(self.is_override_flags[idx]),
         }
 
         # Only add mask to dictionary if it exists
@@ -532,6 +540,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
         data = batch["data"][0].to(self.device, non_blocking=True) / 255.0
         pose = batch["pose"][0].to(self.device, non_blocking=True)
         intr = batch["intr"][0].item()
+        is_override = batch["is_override"][0]
 
         assert data.dtype == torch.float32
         assert pose.dtype == torch.float32
@@ -547,6 +556,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
             "rays_dir": rays_dir,
             "T_to_world": pose,
             f"intrinsics_{camera_name}": camera_params_dict,
+            "is_override": is_override,
         }
 
         if "mask" in batch:

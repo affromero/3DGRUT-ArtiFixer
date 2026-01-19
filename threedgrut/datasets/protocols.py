@@ -30,6 +30,7 @@ class Batch:
     intrinsics: Optional[list] = None
     intrinsics_OpenCVPinholeCameraModelParameters: Optional[dict] = None
     intrinsics_OpenCVFisheyeCameraModelParameters: Optional[dict] = None
+    is_override: bool = False  # True if image comes from override path (distilled)
 
     def __post_init__(self):
         batch_size = self.T_to_world.shape[0]
