@@ -470,7 +470,13 @@ class Trainer3DGRUT:
                 lambda_lpips = self.conf.loss.get('lambda_lpips_override', 0.1)
 
         # Total loss
-        loss = lambda_l1 * loss_l1 + lambda_ssim * loss_ssim + lambda_opacity * loss_opacity + lambda_scale * loss_scale + lambda_lpips * loss_lpips
+        if self.conf.loss.get('use_lpips_override', False) and is_override:
+            override_lambda_ssim = self.conf.loss.get('lambda_ssim_override', 0.2)
+            override_lambda_l1 = self.conf.loss.get('lambda_l1_override', 0.8)
+            override_lambda_reconlosses = self.conf.loss.get('lambda_reconlosses_override', 1.0)
+            loss = lambda_lpips * loss_lpips + override_lambda_reconlosses * (override_lambda_l1 * loss_l1 + override_lambda_ssim * loss_ssim)
+        else:
+            loss = lambda_l1 * loss_l1 + lambda_ssim * loss_ssim + lambda_opacity * loss_opacity + lambda_scale * loss_scale
         return dict(
             total_loss=loss,
             l1_loss=lambda_l1 * loss_l1,
