@@ -11,4 +11,5 @@ loss:
   lambda_lpips_override: 0.1
   lambda_ssim_override: 0.2
   lambda_l1_override: 0.8
-  lambda_reconlosses_override: 1.0
+  lambda_reconlosses_override: 0.0
+  
