@@ -124,6 +124,10 @@ loss:
   use_scale: false
   lambda_scale: 0.0
 
+  # LPIPS loss for override (distilled) images only
+  use_lpips_override: false
+  lambda_lpips_override: 0.1
+
 hydra:
   output_subdir: null
   job:

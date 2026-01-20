@@ -458,8 +458,25 @@ class Trainer3DGRUT:
                 loss_scale = torch.abs(self.model.get_scale()).mean()
                 lambda_scale = self.conf.loss.lambda_scale
 
+        # LPIPS loss for override (distilled) images
+        loss_lpips = torch.zeros(1, device=self.device)
+        lambda_lpips = 0.0
+        is_override = getattr(gpu_batch, 'is_override', False)
+        if self.conf.loss.get('use_lpips_override', False) and is_override:
+            with torch.cuda.nvtx.range(f"loss-lpips"):
+                rgb_gt_full = torch.permute(rgb_gt, (0, 3, 1, 2))
+                pred_rgb_full = torch.permute(rgb_pred.clip(0, 1), (0, 3, 1, 2))
+                loss_lpips = self.criterions["lpips"](pred_rgb_full, rgb_gt_full)
+                lambda_lpips = self.conf.loss.get('lambda_lpips_override', 0.1)
+
         # Total loss
-        loss = lambda_l1 * loss_l1 + lambda_ssim * loss_ssim + lambda_opacity * loss_opacity + lambda_scale * loss_scale
+        if self.conf.loss.get('use_lpips_override', False) and is_override:
+            override_lambda_ssim = self.conf.loss.get('lambda_ssim_override', 0.2)
+            override_lambda_l1 = self.conf.loss.get('lambda_l1_override', 0.8)
+            override_lambda_reconlosses = self.conf.loss.get('lambda_reconlosses_override', 1.0)
+            loss = lambda_lpips * loss_lpips + override_lambda_reconlosses * (override_lambda_l1 * loss_l1 + override_lambda_ssim * loss_ssim)
+        else:
+            loss = lambda_l1 * loss_l1 + lambda_ssim * loss_ssim + lambda_opacity * loss_opacity + lambda_scale * loss_scale
         return dict(
             total_loss=loss,
             l1_loss=lambda_l1 * loss_l1,
@@ -467,6 +484,7 @@ class Trainer3DGRUT:
             ssim_loss=lambda_ssim * loss_ssim,
             opacity_loss=lambda_opacity * loss_opacity,
             scale_loss=lambda_scale * loss_scale,
+            lpips_loss=lambda_lpips * loss_lpips,
         )
 
     @torch.cuda.nvtx.range("log_validation_iter")
@@ -585,6 +603,9 @@ class Trainer3DGRUT:
             if self.conf.loss.use_scale:
                 scale_loss = np.mean(batch_metrics["losses"]["scale_loss"])
                 writer.add_scalar("loss/scale/train", scale_loss, global_step)
+            if self.conf.loss.get('use_lpips_override', False):
+                lpips_loss = np.mean(batch_metrics["losses"]["lpips_loss"])
+                writer.add_scalar("loss/lpips/train", lpips_loss, global_step)
             if "psnr" in batch_metrics:
                 writer.add_scalar("psnr/train", batch_metrics["psnr"], self.global_step)
             if "ssim" in batch_metrics:
