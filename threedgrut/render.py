@@ -23,13 +23,14 @@ import torchvision
 from torchmetrics import PeakSignalNoiseRatio
 from torchmetrics.image import StructuralSimilarityIndexMeasure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
+from scipy.spatial.transform import Rotation, Slerp
 
 import threedgrut.datasets as datasets
 from threedgrut.model.model import MixtureOfGaussians
 from threedgrut.utils.logger import logger
 from threedgrut.utils.misc import create_summary_writer
 from PIL import Image
-
+import imageio
 
 class Renderer:
     def __init__(
@@ -79,7 +80,8 @@ class Renderer:
 
     @classmethod
     def from_checkpoint(
-        cls, checkpoint_path, out_dir, path="", save_gt=True, writer=None, model=None, computes_extra_metrics=True
+        cls, checkpoint_path, out_dir, path="", save_gt=True, writer=None, model=None, computes_extra_metrics=True,
+        config_overrides=None
     ):
         """Loads checkpoint for test path.
         If path is stated, it will override the test path in checkpoint.
@@ -95,6 +97,18 @@ class Renderer:
             conf["render"]["particle_kernel_density_clamping"] = True
             conf["render"]["min_transmittance"] = 0.03
         conf["render"]["enable_kernel_timings"] = True
+
+        # Apply custom config overrides
+        if config_overrides:
+            for key, value in config_overrides.items():
+                if "." in key:
+                    parts = key.split(".")
+                    target = conf
+                    for part in parts[:-1]:
+                        target = target[part]
+                    target[parts[-1]] = value
+                else:
+                    conf[key] = value
 
         object_name = Path(conf.path).stem
         if object_name == "nerfstudio": # DL3DV Benchmark dataset path always ends in nerfstudio parent directory name is more useful
@@ -311,3 +325,603 @@ class Renderer:
                 )
 
         return mean_psnr, std_psnr, mean_inference_time
+
+    def interpolate_poses(self, pose1, pose2, alpha):
+        """
+        Interpolate between two camera poses using SLERP for rotation and linear interpolation for translation.
+
+        Args:
+            pose1: 4x4 transformation matrix (first pose)
+            pose2: 4x4 transformation matrix (second pose)
+            alpha: interpolation parameter (0 = pose1, 1 = pose2)
+
+        Returns:
+            Interpolated 4x4 transformation matrix
+        """
+        # Extract rotation and translation
+        R1 = pose1[:3, :3]
+        R2 = pose2[:3, :3]
+        t1 = pose1[:3, 3]
+        t2 = pose2[:3, 3]
+
+        # Convert rotation matrices to scipy Rotation objects
+        rot1 = Rotation.from_matrix(R1)
+        rot2 = Rotation.from_matrix(R2)
+
+        # Use SLERP for smooth rotation interpolation
+        key_times = [0, 1]
+        key_rots = Rotation.concatenate([rot1, rot2])
+        slerp = Slerp(key_times, key_rots)
+        interp_rot = slerp([alpha])[0]
+
+        # Linear interpolation for translation
+        interp_t = (1 - alpha) * t1 + alpha * t2
+
+        # Construct interpolated pose matrix
+        interp_pose = np.eye(4)
+        interp_pose[:3, :3] = interp_rot.as_matrix()
+        interp_pose[:3, 3] = interp_t
+
+        return interp_pose
+
+    @torch.no_grad()
+    def render_trajectory(self, trajectory: list[int], interp_distance: float = 0.1):
+        """
+        Render a trajectory of camera poses with optional interpolation based on distance.
+
+        Args:
+            trajectory: List of dataset indices to render
+            interp_distance: Distance in meters between interpolated frames. If 0, no interpolation is performed.
+                           For example, 0.1 will generate a frame every 0.1 meters along the trajectory.
+        """
+        output_path_renders = os.path.join(self.out_dir, f"ours_{int(self.global_step)}", "renders")
+        output_path_opacity = os.path.join(self.out_dir, f"ours_{int(self.global_step)}", "opacity")
+        output_path_depth = os.path.join(self.out_dir, f"ours_{int(self.global_step)}", "depth")
+        os.makedirs(output_path_renders, exist_ok=True)
+        os.makedirs(output_path_opacity, exist_ok=True)
+        os.makedirs(output_path_depth, exist_ok=True)
+
+        # Calculate total number of frames including interpolated ones
+        total_frames = len(trajectory)
+        if interp_distance > 0 and len(trajectory) > 1:
+            for traj_idx in range(len(trajectory) - 1):
+                batch = self.dataset[trajectory[traj_idx]]
+                next_batch = self.dataset[trajectory[traj_idx + 1]]
+                pose_current = batch["pose"].squeeze(0).cpu().numpy()
+                pose_next = next_batch["pose"].squeeze(0).cpu().numpy()
+                distance = np.linalg.norm(pose_next[:3, 3] - pose_current[:3, 3])
+                num_interp = int(distance / interp_distance)
+                total_frames += num_interp
+
+        logger.start_progress(task_name="Rendering Trajectory", total_steps=total_frames, color="orange1")
+
+        images = []
+        frame_idx = 0
+
+        frame_to_gt_index = {}
+
+        for traj_idx in range(len(trajectory)):
+            frame_to_gt_index[frame_idx] = traj_idx
+            # Get current keyframe
+            index = trajectory[traj_idx]
+            batch = self.dataset[index]
+
+            # Render the keyframe
+            batch_for_render = {k: v.unsqueeze(0) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+            batch_for_render["intr"] = torch.IntTensor([batch["intr"]])
+            gpu_batch = self.dataset.get_gpu_batch_with_intrinsics(batch_for_render)
+            outputs = self.model(gpu_batch)
+            pred_rgb_full = outputs["pred_rgb"].clamp(0, 1)
+            pred_opacity_full = outputs["pred_opacity"]
+            pred_dist_full = outputs["pred_dist"]
+
+            # Save keyframe
+            torchvision.utils.save_image(
+                pred_rgb_full.squeeze(0).permute(2, 0, 1),
+                os.path.join(output_path_renders, "{0:05d}".format(frame_idx) + ".png"),
+            )
+            Image.fromarray((pred_opacity_full * 255).round().byte().squeeze().detach().cpu().numpy()).save(
+                os.path.join(output_path_opacity, "{0:05d}".format(frame_idx) + ".png")
+            )
+            np.save(
+                os.path.join(output_path_depth, "{0:05d}".format(frame_idx)),
+                pred_dist_full.squeeze(0).detach().cpu().numpy(),
+            )
+            images.append((pred_rgb_full.squeeze(0) * 255).round().byte().detach().cpu().numpy())
+            logger.log_progress(task_name="Rendering Trajectory", advance=1, iteration=f"{str(frame_idx)}")
+            frame_idx += 1
+
+            # Add interpolated frames between this keyframe and the next
+            if traj_idx < len(trajectory) - 1 and interp_distance > 0:
+                next_index = trajectory[traj_idx + 1]
+                next_batch = self.dataset[next_index]
+
+                # Get poses and intrinsics
+                pose_current = batch["pose"].squeeze(0).cpu().numpy()
+                pose_next = next_batch["pose"].squeeze(0).cpu().numpy()
+
+                # Calculate distance between poses
+                distance = np.linalg.norm(pose_next[:3, 3] - pose_current[:3, 3])
+
+                # Calculate number of interpolated frames based on distance
+                num_interp_frames = int(distance / interp_distance)
+
+                # Generate interpolated frames
+                for interp_step in range(1, num_interp_frames + 1):
+                    alpha = interp_step / (num_interp_frames + 1)
+
+                    # Interpolate pose
+                    interp_pose = self.interpolate_poses(pose_current, pose_next, alpha)
+
+                    # Create interpolated batch
+                    interp_batch = {
+                        "pose": torch.FloatTensor(interp_pose).view(batch_for_render["pose"].shape),
+                        "intr": batch_for_render["intr"],
+                    }
+
+                    # Add data and mask from current keyframe (for shape and mask info)
+                    if "data" in batch_for_render:
+                        interp_batch["data"] = batch_for_render["data"]
+                    if "mask" in batch_for_render:
+                        interp_batch["mask"] = batch_for_render["mask"]
+
+                    # Render interpolated frame
+                    gpu_batch = self.dataset.get_gpu_batch_with_intrinsics(interp_batch)
+                    outputs = self.model(gpu_batch)
+                    pred_rgb_full = outputs["pred_rgb"]
+                    pred_opacity_full = outputs["pred_opacity"]
+                    pred_dist_full = outputs["pred_dist"]
+
+                    # Save interpolated frame
+                    torchvision.utils.save_image(
+                        pred_rgb_full.squeeze(0).permute(2, 0, 1),
+                        os.path.join(output_path_renders, "{0:05d}".format(frame_idx) + ".png"),
+                    )
+                    Image.fromarray((pred_opacity_full * 255).round().byte().squeeze().detach().cpu().numpy()).save(
+                        os.path.join(output_path_opacity, "{0:05d}".format(frame_idx) + ".png")
+                    )
+                    np.save(
+                        os.path.join(output_path_depth, "{0:05d}".format(frame_idx)),
+                        pred_dist_full.squeeze(0).detach().cpu().numpy(),
+                    )
+                    images.append((pred_rgb_full.squeeze(0) * 255).round().byte().detach().cpu().numpy())
+                    logger.log_progress(task_name="Rendering Trajectory", advance=1, iteration=f"{str(frame_idx)}")
+                    frame_idx += 1
+
+        imageio.mimsave(os.path.join(self.out_dir, f"ours_{int(self.global_step)}", "trajectory.mp4"), images, fps=15)
+        with open(os.path.join(self.out_dir, f"ours_{int(self.global_step)}", "frame_to_gt_index.json"), "w") as f:
+            json.dump(frame_to_gt_index, f, indent=4)
+
+    @torch.no_grad()
+    def render_from_file(self, trajectory_file: Path):
+        output_path_renders = os.path.join(self.out_dir, f"ours_{int(self.global_step)}", trajectory_file.stem, "renders")
+        output_path_opacity = os.path.join(self.out_dir, f"ours_{int(self.global_step)}", trajectory_file.stem, "opacity")
+        output_path_depth = os.path.join(self.out_dir, f"ours_{int(self.global_step)}", trajectory_file.stem, "depth")
+        os.makedirs(output_path_renders, exist_ok=True)
+        os.makedirs(output_path_opacity, exist_ok=True)
+        os.makedirs(output_path_depth, exist_ok=True)
+
+        with trajectory_file.open() as f:
+            trajectory = json.load(f)
+            
+        trajectory_poses = []
+        for pose in trajectory:
+            pose_array = np.array(pose, dtype=np.float32)
+            if pose_array.shape == (4, 4):
+                to_add = pose_array
+            else:
+                to_add = np.eye(4, dtype=np.float32)
+                to_add[:3] = pose_array
+            trajectory_poses.append(to_add)
+
+        logger.start_progress(task_name="Rendering Trajectory", total_steps=len(trajectory_poses), color="orange1")
+
+        images = []
+        poses = []
+        
+        template_batch = self.dataset[0]
+        template_batch_for_render = {k: v.unsqueeze(0) if isinstance(v, torch.Tensor) else v for k, v in template_batch.items()}
+        template_batch_for_render["intr"] = torch.IntTensor([template_batch["intr"]])
+
+        for pose_idx in range(len(trajectory_poses)):
+            poses.append(trajectory_poses[pose_idx].tolist())
+
+            interp_batch = {
+                "pose": torch.FloatTensor(trajectory_poses[pose_idx]).view(template_batch_for_render["pose"].shape),
+                "intr": template_batch_for_render["intr"],
+                "is_override": [False],
+            }
+
+            if "data" in template_batch_for_render:
+                interp_batch["data"] = template_batch_for_render["data"]
+            if "mask" in template_batch_for_render:
+                interp_batch["mask"] = template_batch_for_render["mask"]
+
+            gpu_batch = self.dataset.get_gpu_batch_with_intrinsics(interp_batch)
+            outputs = self.model(gpu_batch)
+            pred_rgb_full = outputs["pred_rgb"]
+            pred_opacity_full = outputs["pred_opacity"]
+            pred_dist_full = outputs["pred_dist"]
+
+            # Save frame
+            torchvision.utils.save_image(
+                pred_rgb_full.squeeze(0).permute(2, 0, 1),
+                os.path.join(output_path_renders, "{0:05d}".format(pose_idx) + ".png"),
+            )
+            Image.fromarray((pred_opacity_full * 255).round().byte().squeeze().detach().cpu().numpy()).save(
+                os.path.join(output_path_opacity, "{0:05d}".format(pose_idx) + ".png")
+            )
+            np.save(
+                os.path.join(output_path_depth, "{0:05d}".format(pose_idx)),
+                pred_dist_full.squeeze(0).detach().cpu().numpy(),
+            )
+            images.append((pred_rgb_full.squeeze(0) * 255).round().byte().detach().cpu().numpy())
+            logger.log_progress(task_name="Rendering Trajectory", advance=1, iteration=f"{str(pose_idx)}")
+
+        # Save poses and video
+        with open(os.path.join(self.out_dir, f"ours_{int(self.global_step)}", trajectory_file.stem, "poses.json"), "w") as f:
+            json.dump(poses, f, indent=4)
+
+        imageio.mimsave(
+            os.path.join(self.out_dir, f"ours_{int(self.global_step)}", trajectory_file.stem, "trajectory.mp4"), 
+            images, 
+            fps=15
+        )
+        
+        logger.end_progress(task_name="Rendering Trajectory")
+        
+        print(f"Rendered {len(trajectory_poses)} frames in trajectory")
+        print(f"Output saved to: {os.path.join(self.out_dir, f'ours_{int(self.global_step)}', trajectory_file.stem)}")
+
+    def estimate_center_of_interest(self, poses: np.ndarray, threshold: float = 1e-3) -> np.ndarray:
+        """
+        Estimate the 3D point that all cameras are looking at by finding the point that minimizes
+        the sum of squared distances to all camera forward rays.
+        
+        Args:
+            poses: Array of shape (N, 4, 4) containing C2W poses
+            threshold: Convergence threshold for optimization
+        
+        Returns:
+            np.ndarray: 3D point (x, y, z) representing estimated center of interest
+        """
+        camera_positions = poses[:, :3, 3]
+        
+        # Camera forward direction in world coordinates (negative Z-axis of camera frame)
+        # For C2W matrices, the camera forward is -R[:, 2] (negative third column)
+        camera_forwards = -poses[:, :3, 2]
+        
+        # Initial guess: centroid of camera positions
+        center = camera_positions.mean(axis=0)
+        
+        # Iterative refinement using least squares
+        # Find point that minimizes distance to all viewing rays
+        for _ in range(100):
+            # Compute vectors from cameras to current center estimate
+            to_center = center - camera_positions
+            
+            # Project onto camera forward directions to find closest points on rays
+            projections = (to_center * camera_forwards).sum(axis=1, keepdims=True)
+            closest_points = camera_positions + projections * camera_forwards
+            
+            # New center is mean of closest points
+            new_center = closest_points.mean(axis=0)
+            
+            # Check convergence
+            if np.linalg.norm(new_center - center) < threshold:
+                break
+            
+            center = new_center
+        
+        return center
+
+    def compute_pose_distance(self, pose1: np.ndarray, pose2: np.ndarray) -> tuple[float, float]:
+        """
+        Compute the distance between two camera poses.
+        
+        Args:
+            pose1: 4x4 C2W transformation matrix
+            pose2: 4x4 C2W transformation matrix
+        
+        Returns:
+            Tuple[float, float]: (translation_distance, rotation_distance)
+                - translation_distance: Euclidean distance between camera positions
+                - rotation_distance: Angular distance in radians between orientations
+        """
+        # Translation distance
+        t1 = pose1[:3, 3]
+        t2 = pose2[:3, 3]
+        translation_dist = np.linalg.norm(t2 - t1)
+        
+        # Rotation distance (angular distance)
+        R1 = pose1[:3, :3]
+        R2 = pose2[:3, :3]
+        
+        rot1 = Rotation.from_matrix(R1)
+        rot2 = Rotation.from_matrix(R2)
+        
+        # Compute relative rotation
+        relative_rotation = rot2 * rot1.inv()
+        
+        # Angular distance (magnitude of rotation axis-angle representation)
+        rotation_dist = relative_rotation.magnitude()
+        
+        return translation_dist, rotation_dist
+
+    def sort_poses_by_orbit_angle(self, camera_positions: np.ndarray, center: np.ndarray) -> np.ndarray:
+        """
+        Sort camera positions by their angle around the center of interest to create a proper orbit sequence.
+        
+        Uses PCA to find the principal plane of the orbit, then computes angles in that plane.
+        
+        Args:
+            camera_positions: Array of shape (N, 3) containing camera positions
+            center: 3D point representing center of interest
+        
+        Returns:
+            np.ndarray: Array of indices that sort the poses in orbit order
+        """
+        # Center the positions
+        centered_positions = camera_positions - center
+        
+        # Use PCA to find the principal plane of the orbit
+        # The normal to this plane is the direction with least variance
+        cov_matrix = np.cov(centered_positions.T)
+        _, eigenvectors = np.linalg.eigh(cov_matrix)
+        
+        # Choose two orthogonal vectors in the orbit plane
+        # Use the two eigenvectors with largest eigenvalues
+        plane_u = eigenvectors[:, 2]
+        plane_v = eigenvectors[:, 1]
+        
+        # Project camera positions onto the plane
+        u_coords = (centered_positions @ plane_u)
+        v_coords = (centered_positions @ plane_v)
+        
+        # Compute angles in the plane
+        angles = np.arctan2(v_coords, u_coords)
+        
+        # Sort by angle
+        sorted_indices = np.argsort(angles)
+
+        return sorted_indices
+    
+    def interpolate_single_pose(self, pose1: np.ndarray, pose2: np.ndarray, alpha: float) -> np.ndarray:
+        """
+        Interpolate between two camera poses using SLERP for rotation and linear interpolation for translation.
+        
+        Args:
+            pose1: 4x4 C2W transformation matrix (first pose)
+            pose2: 4x4 C2W transformation matrix (second pose)
+            alpha: Interpolation parameter (0 = pose1, 1 = pose2)
+        
+        Returns:
+            np.ndarray: Interpolated 4x4 C2W transformation matrix
+        """
+        # Extract rotation and translation
+        R1 = pose1[:3, :3]
+        R2 = pose2[:3, :3]
+        t1 = pose1[:3, 3]
+        t2 = pose2[:3, 3]
+        
+        # Convert rotation matrices to scipy Rotation objects
+        rot1 = Rotation.from_matrix(R1)
+        rot2 = Rotation.from_matrix(R2)
+        
+        # Use SLERP for smooth rotation interpolation
+        key_times = [0, 1]
+        key_rots = Rotation.concatenate([rot1, rot2])
+        slerp = Slerp(key_times, key_rots)
+        interp_rot = slerp([alpha])[0]
+        
+        # Linear interpolation for translation
+        interp_t = (1 - alpha) * t1 + alpha * t2
+        
+        # Construct interpolated pose matrix
+        interp_pose = np.eye(4)
+        interp_pose[:3, :3] = interp_rot.as_matrix()
+        interp_pose[:3, 3] = interp_t
+        
+        return interp_pose
+
+    def interpolate_orbit_poses(self, poses: np.ndarray, loop: bool, interp_distance: float, rotation_weight: float = 1.0, training_poses: np.ndarray = None) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Interpolate between camera poses following an orbit pattern around a common object of interest.
+        
+        Interpolation density is based on distance between poses rather than fixed frame count.
+        This ensures consistent spacing along the trajectory.
+        
+        Args:
+            poses: Either a numpy array of shape (N, 4, 4) or list of N 4x4 camera-to-world (C2W) transformation matrices
+            interp_distance: Maximum distance between consecutive interpolated poses. Smaller values = denser interpolation.
+                            Distance is computed as: sqrt(translation_dist^2 + (rotation_weight * rotation_dist)^2)
+            loop: If True, interpolate from last pose back to first pose to complete the orbit
+            center_of_interest: Optional 3D point (x, y, z) that cameras are looking at. If None, estimated automatically.
+            rotation_weight: Weight for rotation distance relative to translation distance (default 1.0).
+                            Higher values make rotation contribute more to total distance.
+            first_training_pose: Optional 4x4 C2W matrix of a training pose to start the trajectory from.
+                If provided, trajectory starts here before going through test poses.
+        Returns:
+            np.ndarray: Array of shape (M, 4, 4) containing interpolated C2W poses with approximately uniform spacing
+        
+        Example:
+            >>> test_poses = np.array([...])  # Shape: (10, 4, 4)
+            >>> # Interpolate with max 0.1 units between frames
+            >>> orbit_trajectory = interpolate_orbit_poses(test_poses, interp_distance=0.1)
+        """
+        assert poses.shape[1:] == (4, 4), f"Expected poses of shape (N, 4, 4), got {poses.shape}"
+        assert len(poses) >= 2, "Need at least 2 poses to interpolate"
+        
+        # Extract camera positions (camera centers in world coordinates)
+        test_camera_positions = poses[:, :3, 3]
+        
+        center_of_interest = self.estimate_center_of_interest(poses)
+        
+        # Combine training and test poses for orbit sorting
+        if training_poses is not None:
+            # Combine all poses
+            all_poses = np.concatenate([training_poses, poses], axis=0)
+            all_camera_positions = all_poses[:, :3, 3]
+            
+            # Sort all poses by orbit angle
+            sorted_indices = self.sort_poses_by_orbit_angle(all_camera_positions, center_of_interest)
+            
+            # Find where the first training pose (index 0) is in the sorted order
+            first_training_pose_position = np.where(sorted_indices == 0)[0][0]
+            
+            # Reorder to start from the first training pose
+            sorted_indices = np.concatenate([
+                sorted_indices[first_training_pose_position:],
+                sorted_indices[:first_training_pose_position]
+            ])
+            
+            sorted_poses = all_poses[sorted_indices]
+            
+            # Create a mapping: for each position in sorted order, what's its original index?
+            # Training poses: indices 0 to len(training_poses)-1 -> map to -1 (not tracked)
+            # Test poses: indices len(training_poses) to len(training_poses)+len(poses)-1 -> map to their test index
+            num_training = len(training_poses)
+            original_pose_indices = np.concatenate([
+                np.full(num_training, -1, dtype=np.int32),  # Training poses get -1
+                np.arange(len(poses), dtype=np.int32)        # Test poses get their index
+            ])
+            
+            # Map sorted indices to original indices
+            sorted_original_indices = original_pose_indices[sorted_indices]
+            
+            print(f"Starting orbit from first training pose")
+            print(f"Incorporating {num_training} training poses and {len(poses)} test poses")
+            print(f"Total orbit nodes: {len(sorted_poses)}")
+        else:
+            # Original behavior: only test poses
+            sorted_indices = self.sort_poses_by_orbit_angle(test_camera_positions, center_of_interest)
+            sorted_poses = poses[sorted_indices]
+            sorted_original_indices = sorted_indices
+
+        # Create pairs of poses to interpolate between
+        pose_pairs = []
+        pair_indices = []
+        
+        for i in range(len(sorted_poses) - 1):
+            pose_pairs.append((sorted_poses[i], sorted_poses[i + 1]))
+            pair_indices.append((sorted_original_indices[i], sorted_original_indices[i + 1]))
+        
+        # Optionally add loop back to start
+        if loop:
+            pose_pairs.append((sorted_poses[-1], sorted_poses[0]))
+            pair_indices.append((sorted_original_indices[-1], sorted_original_indices[0]))
+        
+        # Interpolate between all pose pairs based on distance
+        interpolated_poses = []
+        original_indices = []
+
+        for pair_idx, ((pose1, pose2), (idx1, idx2)) in enumerate(zip(pose_pairs, pair_indices)):
+            # Compute distance between poses
+            translation_dist, rotation_dist = self.compute_pose_distance(pose1, pose2)
+            
+            # Combined distance metric
+            total_distance = np.sqrt(translation_dist**2 + (rotation_weight * rotation_dist)**2)
+            
+            # Determine number of interpolations needed
+            num_interpolations = max(1, int(np.ceil(total_distance / interp_distance)))
+            
+            # Determine if this is the last pair (and not looping)
+            is_last_pair = (pair_idx == len(pose_pairs) - 1) and not loop
+
+            # Interpolate
+            for j in range(num_interpolations):
+                alpha = j / num_interpolations
+                
+                if alpha == 0.0:
+                    # This is exactly the first pose
+                    interp_pose = pose1
+                    interpolated_poses.append(interp_pose)
+                    original_indices.append(idx1)
+                else:
+                    # This is an interpolated pose
+                    interp_pose = self.interpolate_single_pose(pose1, pose2, alpha)
+                    interpolated_poses.append(interp_pose)
+                    original_indices.append(-1)
+        
+            # Add the final pose if this is the last pair and we're not looping
+            if is_last_pair:
+                interpolated_poses.append(pose2)
+                original_indices.append(idx2)
+
+        return np.array(interpolated_poses), np.array(original_indices, dtype=np.int32)
+
+    def render_orbit_trajectory(self, interp_distance_unnormalized: float, scale: float, training_pose_start):
+        output_path_renders = os.path.join(self.out_dir, f"ours_{int(self.global_step)}", f"orbit_trajectory_{training_pose_start}_{interp_distance_unnormalized}", "renders")
+        output_path_opacity = os.path.join(self.out_dir, f"ours_{int(self.global_step)}", f"orbit_trajectory_{training_pose_start}_{interp_distance_unnormalized}", "opacity")
+        output_path_depth = os.path.join(self.out_dir, f"ours_{int(self.global_step)}", f"orbit_trajectory_{training_pose_start}_{interp_distance_unnormalized}", "depth")
+        os.makedirs(output_path_renders, exist_ok=True)
+        os.makedirs(output_path_opacity, exist_ok=True)
+        os.makedirs(output_path_depth, exist_ok=True)
+
+        # Get all training poses if requested
+        # Create a training dataset to get all training poses
+        train_dataset = datasets.make(name=self.conf.dataset.type, config=self.conf, ray_jitter=None)[0]
+        training_poses = train_dataset.poses
+        training_poses = torch.from_numpy(training_poses)
+        training_poses = torch.cat([training_poses[training_pose_start].unsqueeze(0), training_poses[:training_pose_start], training_poses[training_pose_start+1:]])
+        print(f"Incorporating {len(training_poses)} training poses into orbit trajectory")
+
+        # Calculate total number of frames including interpolated ones
+        interpolated_poses, original_indices = self.interpolate_orbit_poses(self.dataset.poses, loop=False, interp_distance=interp_distance_unnormalized / scale, training_poses=training_poses)
+
+        logger.start_progress(task_name="Rendering Orbit Trajectory", total_steps=len(interpolated_poses), color="orange1")
+
+        images = []
+
+        frame_to_gt_index = {}
+
+        poses = []
+        template_batch = self.dataset[0]
+        template_batch_for_render = {k: v.unsqueeze(0) if isinstance(v, torch.Tensor) else v for k, v in template_batch.items()}
+        template_batch_for_render["intr"] = torch.IntTensor([template_batch["intr"]])
+
+        for pose_idx in range(len(interpolated_poses)):
+            if original_indices[pose_idx] != -1:
+                frame_to_gt_index[pose_idx] = int(original_indices[pose_idx])
+            # Get current keyframe
+            poses.append(interpolated_poses[pose_idx].tolist())
+
+            interp_batch = {
+                "pose": torch.FloatTensor(interpolated_poses[pose_idx]).view(template_batch_for_render["pose"].shape),
+                "intr": template_batch_for_render["intr"],
+            }
+
+            if "data" in template_batch_for_render:
+                interp_batch["data"] = template_batch_for_render["data"]
+            if "mask" in template_batch_for_render:
+                interp_batch["mask"] = template_batch_for_render["mask"]
+
+            gpu_batch = self.dataset.get_gpu_batch_with_intrinsics(interp_batch)
+            outputs = self.model(gpu_batch)
+            pred_rgb_full = outputs["pred_rgb"]
+            pred_opacity_full = outputs["pred_opacity"]
+            pred_dist_full = outputs["pred_dist"]
+
+            # Save interpolated frame
+            torchvision.utils.save_image(
+                pred_rgb_full.squeeze(0).permute(2, 0, 1),
+                os.path.join(output_path_renders, "{0:05d}".format(pose_idx) + ".png"),
+            )
+            Image.fromarray((pred_opacity_full * 255).round().byte().squeeze().detach().cpu().numpy()).save(
+                os.path.join(output_path_opacity, "{0:05d}".format(pose_idx) + ".png")
+            )
+            np.save(
+                os.path.join(output_path_depth, "{0:05d}".format(pose_idx)),
+                pred_dist_full.squeeze(0).detach().cpu().numpy(),
+            )
+            images.append((pred_rgb_full.squeeze(0) * 255).round().byte().detach().cpu().numpy())
+            logger.log_progress(task_name="Rendering Orbit Trajectory", advance=1, iteration=f"{str(pose_idx)}")
+
+        with open(os.path.join(self.out_dir, f"ours_{int(self.global_step)}", f"orbit_trajectory_{training_pose_start}_{interp_distance_unnormalized}", "poses.json"), "w") as f:
+            json.dump(poses, f, indent=4)
+
+        imageio.mimsave(os.path.join(self.out_dir, f"ours_{int(self.global_step)}", f"orbit_trajectory_{training_pose_start}_{interp_distance_unnormalized}", "orbit_trajectory.mp4"), images, fps=15)
+        with open(os.path.join(self.out_dir, f"ours_{int(self.global_step)}", f"orbit_trajectory_{training_pose_start}_{interp_distance_unnormalized}", "frame_to_gt_index.json"), "w") as f:
+            json.dump(frame_to_gt_index, f, indent=4)
+
+

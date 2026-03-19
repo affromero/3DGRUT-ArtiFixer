@@ -15,7 +15,6 @@
 
 import copy
 import os
-import platform
 import json
 import collections
 
@@ -100,6 +99,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
                 if self.image_path_override is None:
                     indices = selected_indices[:self.num_selected_indices]
             elif self.split == "val":
+                self.override_indices = set(selected_indices[:self.num_selected_indices])
                 if self.image_path_override is None:
                     indices = np.setdiff1d(indices, selected_indices[:self.num_selected_indices])
 
@@ -111,8 +111,15 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
             f_split.close()
             if self.split == "train":
                 self.override_indices = set(train_test_split['train_ids'])
+                print( "override indices: ", self.override_indices)
                 if self.image_path_override is None:
                     indices = np.array(train_test_split['train_ids'])
+                else:
+                    print( "train_test_split['train_ids']: ", train_test_split['train_ids'])
+                    print( "train_test_split['test_ids']: ", train_test_split['test_ids'])
+                    indices = np.union1d(train_test_split['train_ids'], train_test_split['test_ids'])
+                    # indices = np.concatenate([train_test_split['train_ids'], train_test_split['test_ids']])
+                    print(indices)
             else:
                 if self.image_path_override is None:
                     indices = np.array(train_test_split['test_ids'])
@@ -141,6 +148,29 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
         self.camera_centers = self.camera_centers[indices]
         self.is_override_flags = self.is_override_flags[indices]  # Filter override flags by split
         self.center, self.length_scale, self.scene_bbox = self.compute_spatial_extents()
+
+        # Get reference image size from a non-override image (for resizing override images)
+        self.reference_size = None
+        if self.image_path_override is not None:
+            non_override_idx = np.where(~self.is_override_flags)[0]
+            logger.info(f"is_override_flags: {self.is_override_flags}")
+            logger.info(f"non_override_idx: {non_override_idx}")
+            if len(non_override_idx) > 0:
+                ref_path = self.image_paths[non_override_idx[0]]
+                logger.info(f"Reference image path: {ref_path}")
+                ref_img = Image.open(ref_path)
+                self.reference_size = (ref_img.width, ref_img.height)
+                logger.info(f"Reference image size for override resizing: {self.reference_size}")
+            else:
+                # No non-override images in this split - get size from original images folder
+                images_folder = self.get_images_folder()
+                original_images_dir = os.path.join(self.path, images_folder)
+                if os.path.isdir(original_images_dir):
+                    first_img = next((f for f in os.listdir(original_images_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))), None)
+                    if first_img:
+                        ref_img = Image.open(os.path.join(original_images_dir, first_img))
+                        self.reference_size = (ref_img.width, ref_img.height)
+                        logger.info(f"Reference image size from original folder: {self.reference_size}")
 
         # Update the number of frames to only include the samples from the split
         self.n_frames = self.poses.shape[0]
@@ -386,7 +416,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
 
                 img_rel_path = extr["file_path"].split("/")[-1]
                 if use_override:
-                    img_rel_path = f"{frame_idx:04d}.png"
+                    img_rel_path = f"{frame_idx:05d}.png"
                     image_path = os.path.join(self.path, self.image_path_override, img_rel_path)
                 else:
                     image_path = os.path.join(self.path, self.get_images_folder(), img_rel_path)
@@ -408,7 +438,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
 
                 img_rel_path = extr.name.split("/")[-1]
                 if use_override:
-                    img_rel_path = f"{frame_idx:04d}.png"
+                    img_rel_path = f"{frame_idx:05d}.png"
                     image_path = os.path.join(self.path, self.image_path_override, img_rel_path)
                 else:
                     image_path = os.path.join(self.path, self.get_images_folder(), img_rel_path)
@@ -512,7 +542,14 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
 
     def __getitem__(self, idx) -> dict:
         # Load image and get its actual dimensions
-        image_data = np.asarray(Image.open(self.image_paths[idx]))
+        img = Image.open(self.image_paths[idx])
+        # original_size = (img.width, img.height)
+        # Resize override images to match reference (non-override) image size
+        if self.is_override_flags[idx] and self.reference_size is not None:
+            # if original_size != self.reference_size:
+            #     logger.info(f"Resizing override image {idx} from {original_size} to {self.reference_size}")
+            img = img.resize(self.reference_size, Image.LANCZOS)
+        image_data = np.asarray(img)
         actual_h, actual_w = image_data.shape[:2]
 
         # Use actual image dimensions for output shape
@@ -540,7 +577,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
         data = batch["data"][0].to(self.device, non_blocking=True) / 255.0
         pose = batch["pose"][0].to(self.device, non_blocking=True)
         intr = batch["intr"][0].item()
-        is_override = batch["is_override"][0]
+        is_override = batch["is_override"][0] if "is_override" in batch else False
 
         assert data.dtype == torch.float32
         assert pose.dtype == torch.float32

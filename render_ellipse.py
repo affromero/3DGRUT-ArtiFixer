@@ -18,6 +18,7 @@ import imageio
 import numpy as np
 import torch
 import torchvision
+from PIL import Image
 
 import threedgrut.datasets as datasets
 from threedgrut.datasets.protocols import Batch
@@ -261,7 +262,9 @@ class EllipseRenderer:
         # Setup output
         output_path = Path(self.out_dir) / f"ellipse_{int(self.global_step)}"
         renders_path = output_path / "renders"
+        opacity_path = output_path / "opacity"
         renders_path.mkdir(parents=True, exist_ok=True)
+        opacity_path.mkdir(parents=True, exist_ok=True)
         
         with open(output_path / "ellipse_poses.json", "w") as f:
             json.dump(ellipse_poses[:, :3, :].tolist(), f, indent=4)
@@ -284,8 +287,12 @@ class EllipseRenderer:
             
             outputs = self.model(batch)
             pred_rgb = outputs["pred_rgb"]
+            pred_opacity = outputs["pred_opacity"]
             
             torchvision.utils.save_image(pred_rgb.squeeze(0).permute(2, 0, 1), str(renders_path / f"{i:05d}.png"))
+            Image.fromarray((pred_opacity * 255).round().byte().squeeze().detach().cpu().numpy()).save(
+                str(opacity_path / f"{i:05d}.png")
+            )
             images.append((pred_rgb.squeeze(0).cpu().numpy() * 255).astype(np.uint8))
             logger.log_progress(task_name="Rendering", advance=1)
         
