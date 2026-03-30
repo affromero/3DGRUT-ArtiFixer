@@ -53,12 +53,6 @@ if __name__ == "__main__":
         computes_extra_metrics=False,
     )
 
-    # dataset = datasets.make(name=renderer.conf.dataset.type, config=renderer.conf, ray_jitter=None)[0]
-    # with (Path(args.trajectory_file).parent / f"train_poses_{Path(args.out_dir).name[-5]}.json").open("w") as f:
-    #     json.dump(dataset.poses.tolist(), f, indent=4)
-
-    # import sys; sys.exit(0)
-
     with args.scale_file.open() as f:
         scale = float(f.read().split("Scale factor: ")[1])
 
