@@ -221,11 +221,13 @@ class Renderer:
             # The values are already alpha composited with the background
             torchvision.utils.save_image(
                 pred_rgb_full.squeeze(0).permute(2, 0, 1),
-                os.path.join(output_path_renders, "{0:05d}".format(iteration) + ".png"),
+                os.path.join(output_path_renders, f"{iteration:05d}.png"),
             )
-            Image.fromarray((pred_opacity_full * 255).round().byte().squeeze().detach().cpu().numpy()).save(os.path.join(output_path_opacity, "{0:05d}".format(iteration) + ".png"))
+            Image.fromarray((pred_opacity_full * 255).round().byte().squeeze().detach().cpu().numpy()).save(
+                os.path.join(output_path_opacity, f"{iteration:05d}.png")
+            )
             np.save(
-                os.path.join(output_path_depth, "{0:05d}".format(iteration)),
+                os.path.join(output_path_depth, f"{iteration:05d}"),
                 pred_dist_full.squeeze(0).detach().cpu().numpy(),
             )
             pred_img_to_write = pred_rgb_full[-1].clip(0, 1.0)
@@ -326,43 +328,46 @@ class Renderer:
 
         return mean_psnr, std_psnr, mean_inference_time
 
-    def interpolate_poses(self, pose1, pose2, alpha):
-        """
-        Interpolate between two camera poses using SLERP for rotation and linear interpolation for translation.
+    def _step_output_dir(self, subdir: str = "") -> str:
+        base = os.path.join(self.out_dir, f"ours_{int(self.global_step)}")
+        return os.path.join(base, subdir) if subdir else base
 
-        Args:
-            pose1: 4x4 transformation matrix (first pose)
-            pose2: 4x4 transformation matrix (second pose)
-            alpha: interpolation parameter (0 = pose1, 1 = pose2)
+    def _setup_output_dirs(self, subdir: str = "") -> tuple[str, str, str]:
+        base = self._step_output_dir(subdir)
+        paths = (
+            os.path.join(base, "renders"),
+            os.path.join(base, "opacity"),
+            os.path.join(base, "depth"),
+        )
+        for path in paths:
+            os.makedirs(path, exist_ok=True)
+        return paths
 
-        Returns:
-            Interpolated 4x4 transformation matrix
-        """
-        # Extract rotation and translation
-        R1 = pose1[:3, :3]
-        R2 = pose2[:3, :3]
-        t1 = pose1[:3, 3]
-        t2 = pose2[:3, 3]
+    def _make_template_batch(self) -> dict:
+        template = self.dataset[0]
+        batch = {k: v.unsqueeze(0) if isinstance(v, torch.Tensor) else v for k, v in template.items()}
+        batch["intr"] = torch.IntTensor([template["intr"]])
+        return batch
 
-        # Convert rotation matrices to scipy Rotation objects
-        rot1 = Rotation.from_matrix(R1)
-        rot2 = Rotation.from_matrix(R2)
+    def _save_frame(self, outputs: dict, frame_idx: int, output_dirs: tuple[str, str, str], images: list, task_name: str) -> None:
+        output_path_renders, output_path_opacity, output_path_depth = output_dirs
+        pred_rgb_full = outputs["pred_rgb"]
+        pred_opacity_full = outputs["pred_opacity"]
+        pred_dist_full = outputs["pred_dist"]
 
-        # Use SLERP for smooth rotation interpolation
-        key_times = [0, 1]
-        key_rots = Rotation.concatenate([rot1, rot2])
-        slerp = Slerp(key_times, key_rots)
-        interp_rot = slerp([alpha])[0]
-
-        # Linear interpolation for translation
-        interp_t = (1 - alpha) * t1 + alpha * t2
-
-        # Construct interpolated pose matrix
-        interp_pose = np.eye(4)
-        interp_pose[:3, :3] = interp_rot.as_matrix()
-        interp_pose[:3, 3] = interp_t
-
-        return interp_pose
+        torchvision.utils.save_image(
+            pred_rgb_full.squeeze(0).permute(2, 0, 1),
+            os.path.join(output_path_renders, f"{frame_idx:05d}.png"),
+        )
+        Image.fromarray((pred_opacity_full * 255).round().byte().squeeze().detach().cpu().numpy()).save(
+            os.path.join(output_path_opacity, f"{frame_idx:05d}.png")
+        )
+        np.save(
+            os.path.join(output_path_depth, f"{frame_idx:05d}"),
+            pred_dist_full.squeeze(0).detach().cpu().numpy(),
+        )
+        images.append((pred_rgb_full.squeeze(0) * 255).round().byte().detach().cpu().numpy())
+        logger.log_progress(task_name=task_name, advance=1, iteration=str(frame_idx))
 
     @torch.no_grad()
     def render_trajectory(self, trajectory: list[int], interp_distance: float = 0.1):
@@ -374,12 +379,9 @@ class Renderer:
             interp_distance: Distance in meters between interpolated frames. If 0, no interpolation is performed.
                            For example, 0.1 will generate a frame every 0.1 meters along the trajectory.
         """
-        output_path_renders = os.path.join(self.out_dir, f"ours_{int(self.global_step)}", "renders")
-        output_path_opacity = os.path.join(self.out_dir, f"ours_{int(self.global_step)}", "opacity")
-        output_path_depth = os.path.join(self.out_dir, f"ours_{int(self.global_step)}", "depth")
-        os.makedirs(output_path_renders, exist_ok=True)
-        os.makedirs(output_path_opacity, exist_ok=True)
-        os.makedirs(output_path_depth, exist_ok=True)
+        output_dirs = self._setup_output_dirs()
+        step_dir = self._step_output_dir()
+        task_name = "Rendering Trajectory"
 
         # Calculate total number of frames including interpolated ones
         total_frames = len(trajectory)
@@ -390,188 +392,97 @@ class Renderer:
                 pose_current = batch["pose"].squeeze(0).cpu().numpy()
                 pose_next = next_batch["pose"].squeeze(0).cpu().numpy()
                 distance = np.linalg.norm(pose_next[:3, 3] - pose_current[:3, 3])
-                num_interp = int(distance / interp_distance)
-                total_frames += num_interp
+                total_frames += int(distance / interp_distance)
 
-        logger.start_progress(task_name="Rendering Trajectory", total_steps=total_frames, color="orange1")
+        logger.start_progress(task_name=task_name, total_steps=total_frames, color="orange1")
 
         images = []
         frame_idx = 0
-
         frame_to_gt_index = {}
 
         for traj_idx in range(len(trajectory)):
             frame_to_gt_index[frame_idx] = traj_idx
-            # Get current keyframe
-            index = trajectory[traj_idx]
-            batch = self.dataset[index]
+            batch = self.dataset[trajectory[traj_idx]]
 
-            # Render the keyframe
             batch_for_render = {k: v.unsqueeze(0) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
             batch_for_render["intr"] = torch.IntTensor([batch["intr"]])
             gpu_batch = self.dataset.get_gpu_batch_with_intrinsics(batch_for_render)
             outputs = self.model(gpu_batch)
-            pred_rgb_full = outputs["pred_rgb"].clamp(0, 1)
-            pred_opacity_full = outputs["pred_opacity"]
-            pred_dist_full = outputs["pred_dist"]
-
-            # Save keyframe
-            torchvision.utils.save_image(
-                pred_rgb_full.squeeze(0).permute(2, 0, 1),
-                os.path.join(output_path_renders, "{0:05d}".format(frame_idx) + ".png"),
-            )
-            Image.fromarray((pred_opacity_full * 255).round().byte().squeeze().detach().cpu().numpy()).save(
-                os.path.join(output_path_opacity, "{0:05d}".format(frame_idx) + ".png")
-            )
-            np.save(
-                os.path.join(output_path_depth, "{0:05d}".format(frame_idx)),
-                pred_dist_full.squeeze(0).detach().cpu().numpy(),
-            )
-            images.append((pred_rgb_full.squeeze(0) * 255).round().byte().detach().cpu().numpy())
-            logger.log_progress(task_name="Rendering Trajectory", advance=1, iteration=f"{str(frame_idx)}")
+            outputs["pred_rgb"] = outputs["pred_rgb"].clamp(0, 1)
+            self._save_frame(outputs, frame_idx, output_dirs, images, task_name)
             frame_idx += 1
 
-            # Add interpolated frames between this keyframe and the next
             if traj_idx < len(trajectory) - 1 and interp_distance > 0:
-                next_index = trajectory[traj_idx + 1]
-                next_batch = self.dataset[next_index]
-
-                # Get poses and intrinsics
+                next_batch = self.dataset[trajectory[traj_idx + 1]]
                 pose_current = batch["pose"].squeeze(0).cpu().numpy()
                 pose_next = next_batch["pose"].squeeze(0).cpu().numpy()
-
-                # Calculate distance between poses
                 distance = np.linalg.norm(pose_next[:3, 3] - pose_current[:3, 3])
-
-                # Calculate number of interpolated frames based on distance
                 num_interp_frames = int(distance / interp_distance)
 
-                # Generate interpolated frames
                 for interp_step in range(1, num_interp_frames + 1):
                     alpha = interp_step / (num_interp_frames + 1)
-
-                    # Interpolate pose
-                    interp_pose = self.interpolate_poses(pose_current, pose_next, alpha)
-
-                    # Create interpolated batch
+                    interp_pose = self.interpolate_single_pose(pose_current, pose_next, alpha)
                     interp_batch = {
                         "pose": torch.FloatTensor(interp_pose).view(batch_for_render["pose"].shape),
                         "intr": batch_for_render["intr"],
                     }
-
-                    # Add data and mask from current keyframe (for shape and mask info)
-                    if "data" in batch_for_render:
-                        interp_batch["data"] = batch_for_render["data"]
-                    if "mask" in batch_for_render:
-                        interp_batch["mask"] = batch_for_render["mask"]
-
-                    # Render interpolated frame
+                    for key in ("data", "mask"):
+                        if key in batch_for_render:
+                            interp_batch[key] = batch_for_render[key]
                     gpu_batch = self.dataset.get_gpu_batch_with_intrinsics(interp_batch)
                     outputs = self.model(gpu_batch)
-                    pred_rgb_full = outputs["pred_rgb"]
-                    pred_opacity_full = outputs["pred_opacity"]
-                    pred_dist_full = outputs["pred_dist"]
-
-                    # Save interpolated frame
-                    torchvision.utils.save_image(
-                        pred_rgb_full.squeeze(0).permute(2, 0, 1),
-                        os.path.join(output_path_renders, "{0:05d}".format(frame_idx) + ".png"),
-                    )
-                    Image.fromarray((pred_opacity_full * 255).round().byte().squeeze().detach().cpu().numpy()).save(
-                        os.path.join(output_path_opacity, "{0:05d}".format(frame_idx) + ".png")
-                    )
-                    np.save(
-                        os.path.join(output_path_depth, "{0:05d}".format(frame_idx)),
-                        pred_dist_full.squeeze(0).detach().cpu().numpy(),
-                    )
-                    images.append((pred_rgb_full.squeeze(0) * 255).round().byte().detach().cpu().numpy())
-                    logger.log_progress(task_name="Rendering Trajectory", advance=1, iteration=f"{str(frame_idx)}")
+                    self._save_frame(outputs, frame_idx, output_dirs, images, task_name)
                     frame_idx += 1
 
-        imageio.mimsave(os.path.join(self.out_dir, f"ours_{int(self.global_step)}", "trajectory.mp4"), images, fps=15)
-        with open(os.path.join(self.out_dir, f"ours_{int(self.global_step)}", "frame_to_gt_index.json"), "w") as f:
+        imageio.mimsave(os.path.join(step_dir, "trajectory.mp4"), images, fps=15)
+        with open(os.path.join(step_dir, "frame_to_gt_index.json"), "w") as f:
             json.dump(frame_to_gt_index, f, indent=4)
 
     @torch.no_grad()
     def render_from_file(self, trajectory_file: Path):
-        output_path_renders = os.path.join(self.out_dir, f"ours_{int(self.global_step)}", trajectory_file.stem, "renders")
-        output_path_opacity = os.path.join(self.out_dir, f"ours_{int(self.global_step)}", trajectory_file.stem, "opacity")
-        output_path_depth = os.path.join(self.out_dir, f"ours_{int(self.global_step)}", trajectory_file.stem, "depth")
-        os.makedirs(output_path_renders, exist_ok=True)
-        os.makedirs(output_path_opacity, exist_ok=True)
-        os.makedirs(output_path_depth, exist_ok=True)
+        output_dirs = self._setup_output_dirs(trajectory_file.stem)
+        step_dir = self._step_output_dir(trajectory_file.stem)
+        task_name = "Rendering Trajectory"
 
         with trajectory_file.open() as f:
             trajectory = json.load(f)
-            
+
         trajectory_poses = []
         for pose in trajectory:
             pose_array = np.array(pose, dtype=np.float32)
             if pose_array.shape == (4, 4):
-                to_add = pose_array
+                trajectory_poses.append(pose_array)
             else:
                 to_add = np.eye(4, dtype=np.float32)
                 to_add[:3] = pose_array
-            trajectory_poses.append(to_add)
+                trajectory_poses.append(to_add)
 
-        logger.start_progress(task_name="Rendering Trajectory", total_steps=len(trajectory_poses), color="orange1")
+        logger.start_progress(task_name=task_name, total_steps=len(trajectory_poses), color="orange1")
 
         images = []
         poses = []
-        
-        template_batch = self.dataset[0]
-        template_batch_for_render = {k: v.unsqueeze(0) if isinstance(v, torch.Tensor) else v for k, v in template_batch.items()}
-        template_batch_for_render["intr"] = torch.IntTensor([template_batch["intr"]])
+        template_batch = self._make_template_batch()
 
-        for pose_idx in range(len(trajectory_poses)):
-            poses.append(trajectory_poses[pose_idx].tolist())
-
+        for pose_idx, pose in enumerate(trajectory_poses):
+            poses.append(pose.tolist())
             interp_batch = {
-                "pose": torch.FloatTensor(trajectory_poses[pose_idx]).view(template_batch_for_render["pose"].shape),
-                "intr": template_batch_for_render["intr"],
+                "pose": torch.FloatTensor(pose).view(template_batch["pose"].shape),
+                "intr": template_batch["intr"],
                 "is_override": [False],
             }
-
-            if "data" in template_batch_for_render:
-                interp_batch["data"] = template_batch_for_render["data"]
-            if "mask" in template_batch_for_render:
-                interp_batch["mask"] = template_batch_for_render["mask"]
-
+            for key in ("data", "mask"):
+                if key in template_batch:
+                    interp_batch[key] = template_batch[key]
             gpu_batch = self.dataset.get_gpu_batch_with_intrinsics(interp_batch)
             outputs = self.model(gpu_batch)
-            pred_rgb_full = outputs["pred_rgb"]
-            pred_opacity_full = outputs["pred_opacity"]
-            pred_dist_full = outputs["pred_dist"]
+            self._save_frame(outputs, pose_idx, output_dirs, images, task_name)
 
-            # Save frame
-            torchvision.utils.save_image(
-                pred_rgb_full.squeeze(0).permute(2, 0, 1),
-                os.path.join(output_path_renders, "{0:05d}".format(pose_idx) + ".png"),
-            )
-            Image.fromarray((pred_opacity_full * 255).round().byte().squeeze().detach().cpu().numpy()).save(
-                os.path.join(output_path_opacity, "{0:05d}".format(pose_idx) + ".png")
-            )
-            np.save(
-                os.path.join(output_path_depth, "{0:05d}".format(pose_idx)),
-                pred_dist_full.squeeze(0).detach().cpu().numpy(),
-            )
-            images.append((pred_rgb_full.squeeze(0) * 255).round().byte().detach().cpu().numpy())
-            logger.log_progress(task_name="Rendering Trajectory", advance=1, iteration=f"{str(pose_idx)}")
-
-        # Save poses and video
-        with open(os.path.join(self.out_dir, f"ours_{int(self.global_step)}", trajectory_file.stem, "poses.json"), "w") as f:
+        with open(os.path.join(step_dir, "poses.json"), "w") as f:
             json.dump(poses, f, indent=4)
-
-        imageio.mimsave(
-            os.path.join(self.out_dir, f"ours_{int(self.global_step)}", trajectory_file.stem, "trajectory.mp4"), 
-            images, 
-            fps=15
-        )
-        
-        logger.end_progress(task_name="Rendering Trajectory")
-        
+        imageio.mimsave(os.path.join(step_dir, "trajectory.mp4"), images, fps=15)
+        logger.end_progress(task_name=task_name)
         print(f"Rendered {len(trajectory_poses)} frames in trajectory")
-        print(f"Output saved to: {os.path.join(self.out_dir, f'ours_{int(self.global_step)}', trajectory_file.stem)}")
+        print(f"Output saved to: {step_dir}")
 
     def estimate_center_of_interest(self, poses: np.ndarray, threshold: float = 1e-3) -> np.ndarray:
         """
@@ -752,9 +663,6 @@ class Renderer:
         assert poses.shape[1:] == (4, 4), f"Expected poses of shape (N, 4, 4), got {poses.shape}"
         assert len(poses) >= 2, "Need at least 2 poses to interpolate"
         
-        # Extract camera positions (camera centers in world coordinates)
-        test_camera_positions = poses[:, :3, 3]
-        
         center_of_interest = self.estimate_center_of_interest(poses)
         
         # Combine training and test poses for orbit sorting
@@ -851,77 +759,52 @@ class Renderer:
         return np.array(interpolated_poses), np.array(original_indices, dtype=np.int32)
 
     def render_orbit_trajectory(self, interp_distance_unnormalized: float, scale: float, training_pose_start):
-        output_path_renders = os.path.join(self.out_dir, f"ours_{int(self.global_step)}", f"orbit_trajectory_{training_pose_start}_{interp_distance_unnormalized}", "renders")
-        output_path_opacity = os.path.join(self.out_dir, f"ours_{int(self.global_step)}", f"orbit_trajectory_{training_pose_start}_{interp_distance_unnormalized}", "opacity")
-        output_path_depth = os.path.join(self.out_dir, f"ours_{int(self.global_step)}", f"orbit_trajectory_{training_pose_start}_{interp_distance_unnormalized}", "depth")
-        os.makedirs(output_path_renders, exist_ok=True)
-        os.makedirs(output_path_opacity, exist_ok=True)
-        os.makedirs(output_path_depth, exist_ok=True)
+        subdir = f"orbit_trajectory_{training_pose_start}_{interp_distance_unnormalized}"
+        output_dirs = self._setup_output_dirs(subdir)
+        step_dir = self._step_output_dir(subdir)
+        task_name = "Rendering Orbit Trajectory"
 
-        # Get all training poses if requested
-        # Create a training dataset to get all training poses
         train_dataset = datasets.make(name=self.conf.dataset.type, config=self.conf, ray_jitter=None)[0]
         training_poses = train_dataset.poses
-        training_poses = torch.from_numpy(training_poses)
-        training_poses = torch.cat([training_poses[training_pose_start].unsqueeze(0), training_poses[:training_pose_start], training_poses[training_pose_start+1:]])
+        training_poses = np.concatenate([
+            training_poses[training_pose_start:training_pose_start + 1],
+            training_poses[:training_pose_start],
+            training_poses[training_pose_start + 1:],
+        ])
         print(f"Incorporating {len(training_poses)} training poses into orbit trajectory")
 
-        # Calculate total number of frames including interpolated ones
-        interpolated_poses, original_indices = self.interpolate_orbit_poses(self.dataset.poses, loop=False, interp_distance=interp_distance_unnormalized / scale, training_poses=training_poses)
+        interpolated_poses, original_indices = self.interpolate_orbit_poses(
+            self.dataset.poses, loop=False,
+            interp_distance=interp_distance_unnormalized / scale,
+            training_poses=training_poses,
+        )
 
-        logger.start_progress(task_name="Rendering Orbit Trajectory", total_steps=len(interpolated_poses), color="orange1")
+        logger.start_progress(task_name=task_name, total_steps=len(interpolated_poses), color="orange1")
 
         images = []
-
         frame_to_gt_index = {}
-
         poses = []
-        template_batch = self.dataset[0]
-        template_batch_for_render = {k: v.unsqueeze(0) if isinstance(v, torch.Tensor) else v for k, v in template_batch.items()}
-        template_batch_for_render["intr"] = torch.IntTensor([template_batch["intr"]])
+        template_batch = self._make_template_batch()
 
         for pose_idx in range(len(interpolated_poses)):
             if original_indices[pose_idx] != -1:
                 frame_to_gt_index[pose_idx] = int(original_indices[pose_idx])
-            # Get current keyframe
             poses.append(interpolated_poses[pose_idx].tolist())
-
             interp_batch = {
-                "pose": torch.FloatTensor(interpolated_poses[pose_idx]).view(template_batch_for_render["pose"].shape),
-                "intr": template_batch_for_render["intr"],
+                "pose": torch.FloatTensor(interpolated_poses[pose_idx]).view(template_batch["pose"].shape),
+                "intr": template_batch["intr"],
             }
-
-            if "data" in template_batch_for_render:
-                interp_batch["data"] = template_batch_for_render["data"]
-            if "mask" in template_batch_for_render:
-                interp_batch["mask"] = template_batch_for_render["mask"]
-
+            for key in ("data", "mask"):
+                if key in template_batch:
+                    interp_batch[key] = template_batch[key]
             gpu_batch = self.dataset.get_gpu_batch_with_intrinsics(interp_batch)
             outputs = self.model(gpu_batch)
-            pred_rgb_full = outputs["pred_rgb"]
-            pred_opacity_full = outputs["pred_opacity"]
-            pred_dist_full = outputs["pred_dist"]
+            self._save_frame(outputs, pose_idx, output_dirs, images, task_name)
 
-            # Save interpolated frame
-            torchvision.utils.save_image(
-                pred_rgb_full.squeeze(0).permute(2, 0, 1),
-                os.path.join(output_path_renders, "{0:05d}".format(pose_idx) + ".png"),
-            )
-            Image.fromarray((pred_opacity_full * 255).round().byte().squeeze().detach().cpu().numpy()).save(
-                os.path.join(output_path_opacity, "{0:05d}".format(pose_idx) + ".png")
-            )
-            np.save(
-                os.path.join(output_path_depth, "{0:05d}".format(pose_idx)),
-                pred_dist_full.squeeze(0).detach().cpu().numpy(),
-            )
-            images.append((pred_rgb_full.squeeze(0) * 255).round().byte().detach().cpu().numpy())
-            logger.log_progress(task_name="Rendering Orbit Trajectory", advance=1, iteration=f"{str(pose_idx)}")
-
-        with open(os.path.join(self.out_dir, f"ours_{int(self.global_step)}", f"orbit_trajectory_{training_pose_start}_{interp_distance_unnormalized}", "poses.json"), "w") as f:
+        with open(os.path.join(step_dir, "poses.json"), "w") as f:
             json.dump(poses, f, indent=4)
-
-        imageio.mimsave(os.path.join(self.out_dir, f"ours_{int(self.global_step)}", f"orbit_trajectory_{training_pose_start}_{interp_distance_unnormalized}", "orbit_trajectory.mp4"), images, fps=15)
-        with open(os.path.join(self.out_dir, f"ours_{int(self.global_step)}", f"orbit_trajectory_{training_pose_start}_{interp_distance_unnormalized}", "frame_to_gt_index.json"), "w") as f:
+        imageio.mimsave(os.path.join(step_dir, "orbit_trajectory.mp4"), images, fps=15)
+        with open(os.path.join(step_dir, "frame_to_gt_index.json"), "w") as f:
             json.dump(frame_to_gt_index, f, indent=4)
 
 
