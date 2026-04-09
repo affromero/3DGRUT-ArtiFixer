@@ -701,8 +701,7 @@ class Renderer:
             print(f"Incorporating {num_training} training poses and {len(poses)} test poses")
             print(f"Total orbit nodes: {len(sorted_poses)}")
         else:
-            # Original behavior: only test poses
-            sorted_indices = self.sort_poses_by_orbit_angle(test_camera_positions, center_of_interest)
+            sorted_indices = self.sort_poses_by_orbit_angle(poses[:, :3, 3], center_of_interest)
             sorted_poses = poses[sorted_indices]
             sorted_original_indices = sorted_indices
 

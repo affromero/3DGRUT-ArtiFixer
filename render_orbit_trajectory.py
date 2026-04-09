@@ -13,28 +13,32 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Render an orbit trajectory built from actual training/test camera poses.
+
+Sorts all camera poses by their angle around the estimated scene center
+(using PCA), then interpolates between consecutive poses with SLERP.
+Requires a scale file from metric alignment to convert interp_distance
+from real-world units to the scene's coordinate frame.
+
+Used for generating smooth orbit videos that pass through actual camera
+viewpoints, e.g. for qualitative evaluation or visualization.
+
+Usage:
+    python render_orbit_trajectory.py \\
+        --checkpoint /path/to/ckpt_30000.pt \\
+        --out-dir /path/to/output \\
+        --scale-file /path/to/scale_info.txt \\
+        --training-pose-start 0 \\
+        [--interp-distance 0.1]
+"""
+
 import argparse
 from pathlib import Path
 
 from threedgrut.render import Renderer
-import threedgrut.datasets as datasets
-import json
 
 if __name__ == "__main__":
-    '''
-    python render_trajectory.py \
-        --checkpoint /path/to/checkpoint.pt \
-        --path /path/to/data \
-        --out-dir /path/to/output \
-        --trajectory-file /path/to/trajectory.json
-    Example:
-    python render_trajectory.py \
-        --checkpoint /lustre/fsw/portfolios/nvr/users/hturki/3dgrut-outputs/3dgut-mcmc-3view/bicycle/ours_30000/ckpt_30000.pt \
-        --trajectory-file /lustre/fsw/portfolios/nvr/users/hturki/datasets/mipnerf360/bicycle/best_trajectory_3.json \
-        --out-dir /lustre/fsw/portfolios/nvr/users/hturki/3dgrut-outputs/3dgut-mcmc-3view/bicycle/ours_30000/
-    '''
-    # Set up command line argument parser
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="Render orbit trajectory from actual camera poses")
     parser.add_argument("--checkpoint", required=True, type=str, help="path to the pretrained checkpoint")
     parser.add_argument(
         "--path", type=str, default="", help="Path to the training data, if not provided taken from ckpt"

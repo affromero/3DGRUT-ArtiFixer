@@ -13,16 +13,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Render an arbitrary camera trajectory from a JSON file of 3x4 or 4x4 poses.
+
+General-purpose script for rendering any pre-computed trajectory through a
+3dgrut checkpoint. Supports optional dataset image downsampling via
+--downsample for resolution control.
+
+Usage:
+    python render_trajectory.py \\
+        --checkpoint /path/to/ckpt_30000.pt \\
+        --out-dir /path/to/output \\
+        --trajectory-file /path/to/trajectory.json \\
+        [--downsample 2]
+"""
+
 import argparse
 from pathlib import Path
 
 from threedgrut.render import Renderer
-import threedgrut.datasets as datasets
-import json
 
 if __name__ == "__main__":
-    '''
-    '''
     # Set up command line argument parser
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", required=True, type=str, help="path to the pretrained checkpoint")

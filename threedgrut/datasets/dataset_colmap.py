@@ -111,15 +111,10 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
             f_split.close()
             if self.split == "train":
                 self.override_indices = set(train_test_split['train_ids'])
-                print( "override indices: ", self.override_indices)
                 if self.image_path_override is None:
                     indices = np.array(train_test_split['train_ids'])
                 else:
-                    print( "train_test_split['train_ids']: ", train_test_split['train_ids'])
-                    print( "train_test_split['test_ids']: ", train_test_split['test_ids'])
                     indices = np.union1d(train_test_split['train_ids'], train_test_split['test_ids'])
-                    # indices = np.concatenate([train_test_split['train_ids'], train_test_split['test_ids']])
-                    print(indices)
             else:
                 if self.image_path_override is None:
                     indices = np.array(train_test_split['test_ids'])
@@ -153,8 +148,6 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
         self.reference_size = None
         if self.image_path_override is not None:
             non_override_idx = np.where(~self.is_override_flags)[0]
-            logger.info(f"is_override_flags: {self.is_override_flags}")
-            logger.info(f"non_override_idx: {non_override_idx}")
             if len(non_override_idx) > 0:
                 ref_path = self.image_paths[non_override_idx[0]]
                 logger.info(f"Reference image path: {ref_path}")
@@ -543,11 +536,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
     def __getitem__(self, idx) -> dict:
         # Load image and get its actual dimensions
         img = Image.open(self.image_paths[idx])
-        # original_size = (img.width, img.height)
-        # Resize override images to match reference (non-override) image size
         if self.is_override_flags[idx] and self.reference_size is not None:
-            # if original_size != self.reference_size:
-            #     logger.info(f"Resizing override image {idx} from {original_size} to {self.reference_size}")
             img = img.resize(self.reference_size, Image.LANCZOS)
         image_data = np.asarray(img)
         actual_h, actual_w = image_data.shape[:2]

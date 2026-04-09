@@ -523,7 +523,6 @@ class Trainer3DGRUT:
             writer.add_images("image/pred/val", torch.stack(metrics["img_pred"]), global_step, dataformats="NHWC")
         if "img_gt" in metrics:
             writer.add_images("image/gt", torch.stack(metrics["img_gt"]), global_step, dataformats="NHWC")
-
         if "img_hit_counts" in metrics:
             writer.add_images(
                 "image/hit_counts/val", torch.stack(metrics["img_hit_counts"]), global_step, dataformats="NHWC"
