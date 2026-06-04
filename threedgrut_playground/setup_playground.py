@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import os
-import sys
 from pathlib import Path
 
 from threedgrut.utils import jit
@@ -42,45 +41,35 @@ def setup_playground(conf):
         "../threedgrt_tracer/src/particlePrimitives.cu",
     ]
 
-    # Compile slang kernels
-    import importlib
-    import subprocess
+    def to_cpp_bool(value):
+        return "true" if value else "false"
 
-    slang_mod = importlib.import_module("slangtorch")
-    slang_build_env = os.environ
-    slang_build_env["PATH"] += ";" if os.name == "nt" else ":"
-    slang_build_env["PATH"] += os.path.join(os.path.dirname(slang_mod.__file__), "bin")
-    slang_build_3dgrt_inc_dir = os.path.join(THREEDGRT_ROOT, "include")
-    slang_build_playground_inc_dir = os.path.join(PLAYGROUND_ROOT, "include")
-    slang_build_file_dir = os.path.join(THREEDGRT_ROOT, "include/3dgrt/kernels/slang/")
-    subprocess.check_call(
-        [
-            "slangc",
-            "-target",
-            "cuda",
-            "-I",
-            slang_build_3dgrt_inc_dir,
-            "-line-directive-mode",
-            "none",
-            "-O2",
+    # Compile slang kernels
+    slang_build_dir = os.path.join(THREEDGRT_ROOT, "include/3dgrt/kernels/slang")
+    jit.compile_slang_kernel(
+        kernel_files=[
+            f"{os.path.join(slang_build_dir, 'models/gaussianParticles.slang')}",
+            f"{os.path.join(slang_build_dir, 'models/shRadiativeParticles.slang')}",
+        ],
+        output_file=f"{os.path.join(slang_build_dir, 'gaussianParticles.cuh')}",
+        defines=[
             f"-DPARTICLE_RADIANCE_NUM_COEFFS={(conf.render.particle_radiance_sph_degree + 1) ** 2}",
             f"-DGAUSSIAN_PARTICLE_KERNEL_DEGREE={conf.render.particle_kernel_degree}",
             f"-DGAUSSIAN_PARTICLE_MIN_KERNEL_DENSITY={conf.render.particle_kernel_min_response}",
             f"-DGAUSSIAN_PARTICLE_MIN_ALPHA={conf.render.particle_kernel_min_alpha}",
             f"-DGAUSSIAN_PARTICLE_MAX_ALPHA={conf.render.particle_kernel_max_alpha}",
-            f"-DGAUSSIAN_PARTICLE_ENABLE_NORMAL={conf.render.enable_normals}",
-            f"-DGAUSSIAN_PARTICLE_SURFEL={conf.render.primitive_type=='trisurfel'}",
-            f"{os.path.join(slang_build_file_dir,'models/gaussianParticles.slang')}",
-            f"{os.path.join(slang_build_file_dir,'models/shRadiativeParticles.slang')}",
-            "-o",
-            f"{os.path.join(slang_build_file_dir,'gaussianParticles.cuh')}",
+            f"-DGAUSSIAN_PARTICLE_ENABLE_NORMAL={to_cpp_bool(conf.render.enable_normals)}",
+            f"-DGAUSSIAN_PARTICLE_SURFEL={to_cpp_bool(conf.render.primitive_type == 'trisurfel')}",
         ],
-        env=slang_build_env,
+        include_paths=[
+            os.path.join(THREEDGRT_ROOT, "include"),
+            os.path.join(PLAYGROUND_ROOT, "include"),
+        ],
     )
 
     # Compile and load.
     source_paths = [os.path.abspath(os.path.join(os.path.dirname(__file__), fn)) for fn in source_files]
-    jit.load(
+    return jit.load(
         name="libplayground_cc",
         sources=source_paths,
         extra_include_paths=include_paths,

@@ -30,9 +30,6 @@ from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 import threedgrut.datasets as datasets
 from threedgrut.datasets.protocols import BoundedMultiViewDataset
 from threedgrut.datasets.utils import DEFAULT_DEVICE, MultiEpochsDataLoader
-from threedgrut.export.ingp_exporter import INGPExporter
-from threedgrut.export.ply_exporter import PLYExporter
-from threedgrut.export.usdz_exporter import USDZExporter
 from threedgrut.model.losses import ssim
 from threedgrut.model.model import MixtureOfGaussians
 from threedgrut.optimizers import SelectiveAdam
@@ -216,7 +213,7 @@ class Trainer3DGRUT:
         # Initialize
         if conf.resume:  # Load a checkpoint
             logger.info(f"🤸 Loading a pretrained checkpoint from {conf.resume}!")
-            checkpoint = torch.load(conf.resume)
+            checkpoint = torch.load(conf.resume, weights_only=False)
             model.init_from_checkpoint(checkpoint)
             self.strategy.init_densification_buffer(checkpoint)
             global_step = checkpoint["global_step"]
@@ -310,6 +307,8 @@ class Trainer3DGRUT:
     def init_experiments_tracking(self, conf: DictConfig):
         # Initialize the tensorboard writer
         object_name = Path(conf.path).stem
+        if object_name == "nerfstudio": # DL3DV Benchmark dataset path always ends in nerfstudio parent directory name is more useful
+            object_name = Path(conf.path).parent.stem
         writer, out_dir, run_name = create_summary_writer(
             conf, object_name, conf.out_dir, conf.experiment_name, conf.use_wandb
         )
@@ -456,8 +455,25 @@ class Trainer3DGRUT:
                 loss_scale = torch.abs(self.model.get_scale()).mean()
                 lambda_scale = self.conf.loss.lambda_scale
 
+        # LPIPS loss for override (distilled) images
+        loss_lpips = torch.zeros(1, device=self.device)
+        lambda_lpips = 0.0
+        is_override = getattr(gpu_batch, 'is_override', False)
+        if self.conf.loss.get('use_lpips_override', False) and is_override:
+            with torch.cuda.nvtx.range(f"loss-lpips"):
+                rgb_gt_full = torch.permute(rgb_gt, (0, 3, 1, 2))
+                pred_rgb_full = torch.permute(rgb_pred.clip(0, 1), (0, 3, 1, 2))
+                loss_lpips = self.criterions["lpips"](pred_rgb_full, rgb_gt_full)
+                lambda_lpips = self.conf.loss.get('lambda_lpips_override', 0.1)
+
         # Total loss
-        loss = lambda_l1 * loss_l1 + lambda_ssim * loss_ssim + lambda_opacity * loss_opacity + lambda_scale * loss_scale
+        if self.conf.loss.get('use_lpips_override', False) and is_override:
+            override_lambda_ssim = self.conf.loss.get('lambda_ssim_override', 0.2)
+            override_lambda_l1 = self.conf.loss.get('lambda_l1_override', 0.8)
+            override_lambda_reconlosses = self.conf.loss.get('lambda_reconlosses_override', 1.0)
+            loss = lambda_lpips * loss_lpips + override_lambda_reconlosses * (override_lambda_l1 * loss_l1 + override_lambda_ssim * loss_ssim)
+        else:
+            loss = lambda_l1 * loss_l1 + lambda_ssim * loss_ssim + lambda_opacity * loss_opacity + lambda_scale * loss_scale
         return dict(
             total_loss=loss,
             l1_loss=lambda_l1 * loss_l1,
@@ -465,6 +481,7 @@ class Trainer3DGRUT:
             ssim_loss=lambda_ssim * loss_ssim,
             opacity_loss=lambda_opacity * loss_opacity,
             scale_loss=lambda_scale * loss_scale,
+            lpips_loss=lambda_lpips * loss_lpips,
         )
 
     @torch.cuda.nvtx.range("log_validation_iter")
@@ -583,6 +600,9 @@ class Trainer3DGRUT:
             if self.conf.loss.use_scale:
                 scale_loss = np.mean(batch_metrics["losses"]["scale_loss"])
                 writer.add_scalar("loss/scale/train", scale_loss, global_step)
+            if self.conf.loss.get('use_lpips_override', False):
+                lpips_loss = np.mean(batch_metrics["losses"]["lpips_loss"])
+                writer.add_scalar("loss/lpips/train", lpips_loss, global_step)
             if "psnr" in batch_metrics:
                 writer.add_scalar("psnr/train", batch_metrics["psnr"], self.global_step)
             if "ssim" in batch_metrics:
@@ -635,6 +655,8 @@ class Trainer3DGRUT:
         # Export the mixture-of-3d-gaussians in mogt file
         logger.log_rule("Exporting Models")
         if conf.export_ingp.enabled:
+            from threedgrut.export.ingp_exporter import INGPExporter
+
             ingp_path = conf.export_ingp.path if conf.export_ingp.path else os.path.join(out_dir, "export_last.ingp")
             exporter = INGPExporter()
             exporter.export(
@@ -645,10 +667,14 @@ class Trainer3DGRUT:
                 force_half=conf.export_ingp.force_half,
             )
         if conf.export_ply.enabled:
+            from threedgrut.export.ply_exporter import PLYExporter
+
             ply_path = conf.export_ply.path if conf.export_ply.path else os.path.join(out_dir, "export_last.ply")
             exporter = PLYExporter()
             exporter.export(self.model, Path(ply_path), dataset=self.train_dataset, conf=conf)
         if conf.export_usdz.enabled:
+            from threedgrut.export.usdz_exporter import USDZExporter
+
             usdz_path = conf.export_usdz.path if conf.export_usdz.path else os.path.join(out_dir, "export_last.usdz")
             exporter = USDZExporter()
             exporter.export(self.model, Path(usdz_path), dataset=self.train_dataset, conf=conf)

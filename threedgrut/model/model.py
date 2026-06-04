@@ -218,6 +218,8 @@ class MixtureOfGaussians(torch.nn.Module, ExportableModel):
 
         else:
             points_file = os.path.join(root_path, "sparse/0", "points3D.bin")
+            if not os.path.isfile(points_file):
+                points_file = os.path.join(root_path, "colmap/sparse/0", "points3D.bin")
             # also handle nonbinary points files
             if not os.path.isfile(points_file):
                 points_file = os.path.join(root_path, "sparse/0", "points3D.txt")

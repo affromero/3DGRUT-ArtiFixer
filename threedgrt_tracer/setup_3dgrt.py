@@ -36,46 +36,34 @@ def setup_3dgrt(conf):
         "bindings.cpp",
     ]
 
-    # Compile slang kernels
-    # TODO: do not overwrite files, use config hash to register the needed version
-    import importlib
-    import subprocess
+    def to_cpp_bool(value):
+        return "true" if value else "false"
 
-    slang_mod = importlib.import_module("slangtorch")
-    slang_build_env = os.environ
-    slang_build_env["PATH"] += ";" if os.name == "nt" else ":"
-    slang_build_env["PATH"] += os.path.join(os.path.dirname(slang_mod.__file__), "bin")
-    slang_build_inc_dir = os.path.join(os.path.dirname(__file__), "include")
-    slang_build_file_dir = os.path.join(os.path.dirname(__file__), "include", "3dgrt", "kernels", "slang")
-    subprocess.check_call(
-        [
-            "slangc",
-            "-target",
-            "cuda",
-            "-I",
-            slang_build_inc_dir,
-            "-line-directive-mode",
-            "none",
-            "-matrix-layout-row-major",  # NB : this is required for cuda target
-            "-O2",
+    # Compile slang kernels
+    slang_build_dir = os.path.join(os.path.dirname(__file__), "include", "3dgrt", "kernels", "slang")
+    jit.compile_slang_kernel(
+        kernel_files=[
+            f"{os.path.join(slang_build_dir, 'models/gaussianParticles.slang')}",
+            f"{os.path.join(slang_build_dir, 'models/shRadiativeParticles.slang')}",
+        ],
+        output_file=f"{os.path.join(slang_build_dir, 'gaussianParticles.cuh')}",
+        defines=[
             f"-DPARTICLE_RADIANCE_NUM_COEFFS={(conf.render.particle_radiance_sph_degree + 1) ** 2}",
             f"-DGAUSSIAN_PARTICLE_KERNEL_DEGREE={conf.render.particle_kernel_degree}",
             f"-DGAUSSIAN_PARTICLE_MIN_KERNEL_DENSITY={conf.render.particle_kernel_min_response}",
             f"-DGAUSSIAN_PARTICLE_MIN_ALPHA={conf.render.particle_kernel_min_alpha}",
             f"-DGAUSSIAN_PARTICLE_MAX_ALPHA={conf.render.particle_kernel_max_alpha}",
-            f"-DGAUSSIAN_PARTICLE_ENABLE_NORMAL={conf.render.enable_normals}",
-            f"-DGAUSSIAN_PARTICLE_SURFEL={conf.render.primitive_type=='trisurfel'}",
-            f"{os.path.join(slang_build_file_dir,'models/gaussianParticles.slang')}",
-            f"{os.path.join(slang_build_file_dir,'models/shRadiativeParticles.slang')}",
-            "-o",
-            f"{os.path.join(slang_build_file_dir,'gaussianParticles.cuh')}",
+            f"-DGAUSSIAN_PARTICLE_ENABLE_NORMAL={to_cpp_bool(conf.render.enable_normals)}",
+            f"-DGAUSSIAN_PARTICLE_SURFEL={to_cpp_bool(conf.render.primitive_type == 'trisurfel')}",
         ],
-        env=slang_build_env,
+        include_paths=[
+            os.path.join(os.path.dirname(__file__), "include"),
+        ],
     )
 
     # Compile and load.
     source_paths = [os.path.join(os.path.dirname(__file__), fn) for fn in source_files]
-    jit.load(
+    return jit.load(
         name="lib3dgrt_cc",
         sources=source_paths,
         extra_cflags=cflags,

@@ -17,6 +17,8 @@
 
 #include <3dgut/sensors/sensors.h>
 
+#include <cfloat>
+
 namespace threedgut {
 
 template <int N>
@@ -107,7 +109,7 @@ static inline __device__ bool projectPoint(const OpenCVFisheyeProjectionParamete
                                            const tcnn::vec3& position,
                                            float tolerance,
                                            tcnn::vec2& projected) {
-    constexpr float eps   = __FLT_EPSILON__;
+    constexpr float eps   = FLT_EPSILON;
     const float rho       = fmaxf(tcnn::length(position.xy()), eps);
     const float thetaFull = atan2f(rho, position.z);
     // Limit angles to max_angle to prevent projected points to leave valid cone around max_angle.

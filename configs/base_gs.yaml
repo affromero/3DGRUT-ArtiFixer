@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 defaults:
   - _self_
   - /strategy: gs
@@ -14,7 +17,7 @@ gui_update_from_device: true
 val_frequency: 5000
 num_workers: 24
 use_wandb: false
-wandb_project: "3dgrt"
+wandb_project: "dreamfix_3dgrut"
 test_last: true
 validate_first: false
 log_frequency: 1
@@ -123,6 +126,10 @@ loss:
 
   use_scale: false
   lambda_scale: 0.0
+
+  # LPIPS loss for override (distilled) images only
+  use_lpips_override: false
+  lambda_lpips_override: 0.1
 
 hydra:
   output_subdir: null

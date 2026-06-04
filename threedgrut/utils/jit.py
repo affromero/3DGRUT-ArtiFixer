@@ -13,12 +13,44 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import math
 import os
+import sys
 
 import torch
 import torch.utils.cpp_extension
 from torch.utils.cpp_extension import CUDA_HOME
+
+
+def compile_slang_kernel(kernel_files: list[str], output_file: str, defines: list[str], include_paths: list[str]):
+    import importlib
+    import subprocess
+
+    slang_build_env = os.environ.copy()
+    slang_build_env["PATH"] += ";" if os.name == "nt" else ":"
+
+    try:
+        slang_mod = importlib.import_module("slangtorch")
+        slang_build_env["PATH"] += os.path.join(os.path.dirname(slang_mod.__file__), "bin")
+    except ImportError:
+        print("Slangtorch not found, assuming slangc is in the path")
+
+    subprocess.check_call(
+        [
+            "slangc",
+            "-target",
+            "cuda",
+            *(arg for path in include_paths for arg in ("-I", path)),
+            "-line-directive-mode",
+            "none",
+            "-matrix-layout-row-major",
+            "-O2",
+            *defines,
+            *kernel_files,
+            "-o",
+            output_file,
+        ],
+        env=slang_build_env,
+    )
 
 
 def load(
@@ -38,15 +70,17 @@ def load(
         def find_cl_path():
             import glob
 
-            for edition in ["Enterprise", "Professional", "BuildTools", "Community"]:
-                paths = sorted(
-                    glob.glob(
-                        r"C:\Program Files (x86)\Microsoft Visual Studio\*\%s\VC\Tools\MSVC\*\bin\Hostx64\x64" % edition
-                    ),
-                    reverse=True,
-                )
-                if paths:
-                    return paths[0]
+            for arch in [" (x86)", ""]:
+                for edition in ["Enterprise", "Professional", "BuildTools", "Community"]:
+                    paths = sorted(
+                        glob.glob(
+                            r"C:\Program Files%s\Microsoft Visual Studio\*\%s\VC\Tools\MSVC\*\bin\Hostx64\x64"
+                            % (arch, edition)
+                        ),
+                        reverse=True,
+                    )
+                    if paths:
+                        return paths[0]
 
         # If cl.exe is not on path, try to find it.
         if os.system("where cl.exe >nul 2>nul") != 0:
@@ -81,14 +115,19 @@ def load(
 
     # Linker options.
     if os.name == "posix":
-        ldflags = [
-            # NOTE: ad-hoc fix for CUDA 12.8.1
-            f"-L{os.path.join(CUDA_HOME, 'lib', 'stubs')}",
-            f"-L{os.path.join(CUDA_HOME, 'targets', 'x86_64-linux', 'lib')}",
-            f"-L{os.path.join(CUDA_HOME, 'targets', 'x86_64-linux', 'lib', 'stubs')}",
-            "-lcuda",
-            "-lnvrtc",
-        ]
+        # Discover CUDA target dirs dynamically: CUDA 13 on aarch64 uses
+        # `sbsa-linux` (Server Base System Architecture), not `aarch64-linux`.
+        ldflags = [f"-L{os.path.join(CUDA_HOME, 'lib', 'stubs')}"]
+        targets_dir = os.path.join(CUDA_HOME, "targets")
+        if os.path.isdir(targets_dir):
+            for arch in os.listdir(targets_dir):
+                lib_dir = os.path.join(targets_dir, arch, "lib")
+                stubs_dir = os.path.join(lib_dir, "stubs")
+                if os.path.isdir(lib_dir):
+                    ldflags.append(f"-L{lib_dir}")
+                if os.path.isdir(stubs_dir):
+                    ldflags.append(f"-L{stubs_dir}")
+        ldflags += ["-lcuda", "-lnvrtc"]
     elif os.name == "nt":
         ldflags = [
             "cuda.lib",
@@ -99,15 +138,18 @@ def load(
         ldflags += extra_ldflags
 
     # Include paths.
-    include_paths = [
-        # NOTE: ad-hoc fix for CUDA 12.8.1
-        os.path.join(CUDA_HOME, "targets", "x86_64-linux", "include"),
-    ]
+    include_paths = []
+
+    if os.path.isdir(os.path.join(CUDA_HOME, "targets")):
+        for arch in os.listdir(os.path.join(CUDA_HOME, "targets")):
+            if os.path.isdir(p := os.path.join(CUDA_HOME, "targets", arch, "include")):
+                include_paths.append(p)
+
     if extra_include_paths is not None:
         include_paths += extra_include_paths
 
     # Load
-    return torch.utils.cpp_extension.load(
+    module = torch.utils.cpp_extension.load(
         extra_cflags=cflags,
         extra_cuda_cflags=cuda_cflags,
         extra_ldflags=ldflags,
@@ -117,3 +159,10 @@ def load(
         *args,
         **kwargs,
     )
+
+    # Register module in sys.modules for pybind11 3.x compatibility
+    module_name = kwargs.get("name")
+    if module_name is not None:
+        sys.modules[module_name] = module
+
+    return module

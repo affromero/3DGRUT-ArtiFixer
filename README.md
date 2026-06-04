@@ -1,3 +1,18 @@
+<!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
+# 3DGRUT-ArtiFixer
+
+This repository is the ArtiFixer-maintained fork of
+[3DGRUT](https://github.com/nv-tlabs/3dgrut). It is intended to be used as the
+`thirdparty/3DGRUT-ArtiFixer` dependency for
+[ArtiFixer](https://github.com/nv-tlabs/ArtiFixer).
+
+This fork is initialized from the 3DGRUT commit pinned by the ArtiFixer README:
+`9cf1ab0cec26a3f76fa94f1651ec80dfa4d88de4`. The original 3DGRUT README follows.
+
+---
+
 <p align="center">
   <img height="100" src="assets/3dgrut_logo.png">
 </p>
