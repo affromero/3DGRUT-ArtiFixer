@@ -1,3 +1,15 @@
+# 3DGRUT-ArtiFixer
+
+This repository is the ArtiFixer-maintained fork of
+[3DGRUT](https://github.com/nv-tlabs/3dgrut). It is intended to be used as the
+`thirdparty/3DGRUT-ArtiFixer` dependency for
+[ArtiFixer](https://github.com/nv-tlabs/ArtiFixer).
+
+This fork branches from the original 3DGRUT repository at commit
+`40e52e9b4d2e56fcea5a40f95fdadcce9441cb80`. The original 3DGRUT README follows.
+
+---
+
 <p align="center">
   <img height="100" src="assets/3dgrut_logo.png">
 </p>
