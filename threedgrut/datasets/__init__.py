@@ -93,6 +93,7 @@ def make_test(name: str, config):
                 selected_indices_file=config.selected_indices_file, # A json file with the first (or second) half ordered camera poses
                 num_selected_indices=config.num_selected_indices, # Number of selected camera indices for sparse recon
                 train_test_split_file=config.train_test_split_file, # For mipnerf360 ReconFusion, a json file with train-test camera poses
+                image_path_override=config.image_path_override, # Override image paths when rendering distilled test frames
             )
         case "scannetpp":
             dataset = ScannetppDataset(
