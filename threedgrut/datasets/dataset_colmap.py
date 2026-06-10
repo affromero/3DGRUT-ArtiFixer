@@ -214,7 +214,17 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
             self.cam_intrinsics = read_colmap_intrinsics_text(cameras_intrinsic_file)
 
     def get_images_folder(self):
-        downsample_suffix = "" if self.downsample_factor == 1 else f"_{self.downsample_factor}"
+        try:
+            downsample_factor = float(self.downsample_factor)
+        except (TypeError, ValueError):
+            downsample_suffix = "" if self.downsample_factor == 1 else f"_{self.downsample_factor}"
+        else:
+            if downsample_factor == 1:
+                downsample_suffix = ""
+            elif downsample_factor.is_integer():
+                downsample_suffix = f"_{int(downsample_factor)}"
+            else:
+                downsample_suffix = f"_{downsample_factor:g}"
         return f"images{downsample_suffix}"
 
     def load_camera_data(self):
@@ -330,8 +340,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
 
             image_name = cam_id_to_image_name[intr.id]
             # Use original images folder for dimension checking (dimensions are the same)
-            downsample_suffix = "" if self.downsample_factor == 1 else f"_{self.downsample_factor}"
-            images_folder = f"images{downsample_suffix}"
+            images_folder = self.get_images_folder()
             image_name = (
                 os.path.join(os.path.split(image_name)[1], "") if images_folder in image_name else image_name
             )
