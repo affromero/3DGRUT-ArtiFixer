@@ -47,6 +47,14 @@ from .utils import (
 )
 
 
+def load_mask_image_tensor(mask_path, actual_h, actual_w):
+    mask = Image.open(mask_path).convert("L")
+    if mask.size != (actual_w, actual_h):
+        # Masks are labels, not color images; preserve values while resizing.
+        mask = mask.resize((actual_w, actual_h), Image.NEAREST)
+    return torch.from_numpy(np.array(mask)).reshape(1, actual_h, actual_w, 1)
+
+
 class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
     def __init__(
         self,
@@ -595,7 +603,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
 
         # Only add mask to dictionary if it exists
         if os.path.exists(mask_path := self.mask_paths[idx]):
-            mask = torch.from_numpy(np.array(Image.open(mask_path).convert("L"))).reshape(1, actual_h, actual_w, 1)
+            mask = load_mask_image_tensor(mask_path, actual_h, actual_w)
             output_dict["mask"] = mask
 
         return output_dict
