@@ -213,7 +213,9 @@ class Trainer3DGRUT:
         # Initialize
         if conf.resume:  # Load a checkpoint
             logger.info(f"🤸 Loading a pretrained checkpoint from {conf.resume}!")
-            checkpoint = torch.load(conf.resume, weights_only=False)
+            checkpoint = torch.load(
+                conf.resume, map_location=self.device, weights_only=False
+            )
             model.init_from_checkpoint(checkpoint)
             self.strategy.init_densification_buffer(checkpoint)
             global_step = checkpoint["global_step"]
@@ -268,7 +270,11 @@ class Trainer3DGRUT:
                         logger.error(e)
                         raise e
                 case "checkpoint":
-                    checkpoint = torch.load(conf.initialization.path)
+                    checkpoint = torch.load(
+                        conf.initialization.path,
+                        map_location=self.device,
+                        weights_only=False,
+                    )
                     model.init_from_checkpoint(checkpoint, setup_optimizer=False)
                 case _:
                     raise ValueError(
